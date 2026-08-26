@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                                          PAC.mq5 |
-//|                    Pivot and Control — fase 1: deteksi Pivot     |
-//|  Belum ada Control, area entry, atau order.                      |
+//|          Pivot and Control — fase 2: Pivot + candle Base         |
+//|  Belum ada Control (overlap Pivot), area entry, atau order.      |
 //+------------------------------------------------------------------+
 #property copyright "PAC"
 #property version   "1.00"
-#property description "PAC — deteksi Pivot Buy/Sell + penanda chart"
-#property description "Fase 1: belum mengeksekusi order"
+#property description "PAC — deteksi Pivot + candle Base RBR/DBD"
+#property description "Fase 2: belum Control, area entry, atau order"
 
 //+------------------------------------------------------------------+
 //| TYPES                                                            |
@@ -29,11 +29,17 @@ enum ENUM_PIVOT_MARK
    MARK_TRIANGLE   = 241  // Segitiga atas/bawah
   };
 
+enum ENUM_BASE_TYPE
+  {
+   BASE_RBR = 1,  // Rally-Base-Rally (untuk Pivot Buy)
+   BASE_DBD = -1  // Drop-Base-Drop (untuk Pivot Sell)
+  };
+
 //+------------------------------------------------------------------+
 //| INPUTS                                                           |
 //+------------------------------------------------------------------+
 input group "=== Deteksi ==="
-input ENUM_TIMEFRAMES InpDetectionTF = PERIOD_M1;  // Timeframe deteksi Pivot
+input ENUM_TIMEFRAMES InpDetectionTF = PERIOD_M1;  // Timeframe deteksi Pivot & Base
 input int             InpLookback    = 500;        // Jumlah bar yang discan
 
 input group "=== Style Pivot ==="
@@ -41,11 +47,17 @@ input ENUM_PIVOT_MARK InpPivotSymbol = MARK_LOZENGE_SM; // Simbol penanda
 input color           InpPivotColor  = clrYellow;       // Warna penanda
 input int             InpGapPips     = 5;               // Offset (pips). Nanti dipakai juga untuk jarak ujung Base ke Atap/Lantai
 
+input group "=== Style Base ==="
+input color InpBaseColor = clrWhite; // Warna garis High-Low Base
+
 //+------------------------------------------------------------------+
 //| CONST                                                            |
 //+------------------------------------------------------------------+
-const string PREFIX_PB = "PAC_PB_";
-const string PREFIX_PS = "PAC_PS_";
+const string PREFIX_PB  = "PAC_PB_";
+const string PREFIX_PS  = "PAC_PS_";
+const string PREFIX_RBR = "PAC_RBR_";
+const string PREFIX_DBD = "PAC_DBD_";
+const double BASE_BODY_RATIO = 0.5; // |Close-Open| ≤ rasio × (High-Low)
 
 struct Pivot
   {
@@ -59,10 +71,23 @@ struct Pivot
    datetime        confirm2;
   };
 
+struct Base
+  {
+   datetime       time;
+   double         open;
+   double         high;
+   double         low;
+   double         close;
+   ENUM_BASE_TYPE type;
+   datetime       c1;
+   datetime       c3;
+  };
+
 //+------------------------------------------------------------------+
 //| GLOBALS                                                          |
 //+------------------------------------------------------------------+
 Pivot    g_pivots[];
+Base     g_bases[];
 datetime g_lastBarTime = 0;
 
 //+------------------------------------------------------------------+
@@ -78,6 +103,8 @@ void OnDeinit(const int reason)
   {
    ObjectsDeleteAll(0, PREFIX_PB);
    ObjectsDeleteAll(0, PREFIX_PS);
+   ObjectsDeleteAll(0, PREFIX_RBR);
+   ObjectsDeleteAll(0, PREFIX_DBD);
   }
 
 //+------------------------------------------------------------------+
@@ -94,12 +121,19 @@ void OnTick()
 void ScanAndDraw()
   {
    ScanPivots();
+   ScanBases();
    DrawPivots();
+   DrawBases();
+   ChartRedraw(0);
   }
 
 //+------------------------------------------------------------------+
 bool IsGreen(const MqlRates &r) { return(r.close > r.open); }
 bool IsRed(const MqlRates &r)   { return(r.close < r.open); }
+bool IsBase(const MqlRates &r)
+  {
+   return(MathAbs(r.close - r.open) <= BASE_BODY_RATIO * (r.high - r.low));
+  }
 
 //+------------------------------------------------------------------+
 int PivotArrowCode(const bool isBuy)
@@ -223,6 +257,49 @@ void ScanPivots()
   }
 
 //+------------------------------------------------------------------+
+void AddBase(const MqlRates &bar, const ENUM_BASE_TYPE type,
+             const datetime c1, const datetime c3)
+  {
+   const int n = ArraySize(g_bases);
+   ArrayResize(g_bases, n + 1, 64);
+   g_bases[n].time  = bar.time;
+   g_bases[n].open  = bar.open;
+   g_bases[n].high  = bar.high;
+   g_bases[n].low   = bar.low;
+   g_bases[n].close = bar.close;
+   g_bases[n].type  = type;
+   g_bases[n].c1    = c1;
+   g_bases[n].c3    = c3;
+  }
+
+//+------------------------------------------------------------------+
+void ScanBases()
+  {
+   ArrayResize(g_bases, 0);
+
+   const int lookback = MathMax(InpLookback, 4);
+   MqlRates rates[];
+   const int copied = CopyRates(_Symbol, InpDetectionTF, 0, lookback, rates);
+   if(copied < 4)
+      return;
+   ArraySetAsSeries(rates, false);
+
+   const int lastClosed = copied - 2;
+
+   //--- C2 butuh C1 di kiri dan C3 tertutup di kanan
+   for(int i = 1; i < lastClosed; i++)
+     {
+      if(!IsBase(rates[i]))
+         continue;
+
+      if(IsGreen(rates[i - 1]) && IsGreen(rates[i + 1]))
+         AddBase(rates[i], BASE_RBR, rates[i - 1].time, rates[i + 1].time);
+      else if(IsRed(rates[i - 1]) && IsRed(rates[i + 1]))
+         AddBase(rates[i], BASE_DBD, rates[i - 1].time, rates[i + 1].time);
+     }
+  }
+
+//+------------------------------------------------------------------+
 void DrawPivots()
   {
    ObjectsDeleteAll(0, PREFIX_PB);
@@ -232,8 +309,6 @@ void DrawPivots()
    const int n = ArraySize(g_pivots);
    for(int i = 0; i < n; i++)
       CreateArrow(g_pivots[i], gap);
-
-   ChartRedraw(0);
   }
 
 //+------------------------------------------------------------------+
@@ -264,6 +339,47 @@ void CreateArrow(const Pivot &p, const double gap)
                                 DoubleToString(p.close, _Digits),
                                 TimeToString(p.confirm1, TIME_DATE | TIME_MINUTES),
                                 TimeToString(p.confirm2, TIME_DATE | TIME_MINUTES)));
+  }
+
+//+------------------------------------------------------------------+
+void DrawBases()
+  {
+   ObjectsDeleteAll(0, PREFIX_RBR);
+   ObjectsDeleteAll(0, PREFIX_DBD);
+
+   const int n = ArraySize(g_bases);
+   for(int i = 0; i < n; i++)
+      CreateBaseLine(g_bases[i]);
+  }
+
+//+------------------------------------------------------------------+
+void CreateBaseLine(const Base &b)
+  {
+   const bool isRbr = (b.type == BASE_RBR);
+   const string name = (isRbr ? PREFIX_RBR : PREFIX_DBD) + IntegerToString((long)b.time);
+
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, b.time, b.high, b.time, b.low))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpBaseColor);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP,
+                   StringFormat("%s\n%s\nO=%s H=%s L=%s C=%s\nC1: %s | C3: %s",
+                                isRbr ? "PAC Base RBR" : "PAC Base DBD",
+                                TimeToString(b.time, TIME_DATE | TIME_MINUTES),
+                                DoubleToString(b.open, _Digits),
+                                DoubleToString(b.high, _Digits),
+                                DoubleToString(b.low, _Digits),
+                                DoubleToString(b.close, _Digits),
+                                TimeToString(b.c1, TIME_DATE | TIME_MINUTES),
+                                TimeToString(b.c3, TIME_DATE | TIME_MINUTES)));
   }
 
 //+------------------------------------------------------------------+
