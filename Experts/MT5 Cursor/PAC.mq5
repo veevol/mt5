@@ -11,19 +11,22 @@
 //+------------------------------------------------------------------+
 //| TYPES                                                            |
 //+------------------------------------------------------------------+
-enum ENUM_PIVOT_SYMBOL
-  {
-   PIVOT_ARROW    = 0, // Panah
-   PIVOT_TRIANGLE = 1, // Segitiga
-   PIVOT_DOT      = 2, // Titik
-   PIVOT_DIAMOND  = 3, // Belah ketupat
-   PIVOT_THUMB    = 4  // Jempol
-  };
-
 enum ENUM_PIVOT_TYPE
   {
    PIVOT_BUY  = 1,
    PIVOT_SELL = -1
+  };
+
+enum ENUM_PIVOT_MARK
+  {
+   MARK_LOZENGE_SM = 115, // Belah ketupat kecil
+   MARK_LOZENGE    = 116, // Belah ketupat
+   MARK_DIAMOND    = 117, // Diamond
+   MARK_DIAMOND_SM = 119, // Diamond kecil
+   MARK_DOT        = 159, // Titik
+   MARK_CIRCLE     = 108, // Lingkaran
+   MARK_ARROW      = 233, // Panah atas/bawah
+   MARK_TRIANGLE   = 241  // Segitiga atas/bawah
   };
 
 //+------------------------------------------------------------------+
@@ -34,9 +37,9 @@ input ENUM_TIMEFRAMES InpDetectionTF = PERIOD_M1;  // Timeframe deteksi Pivot
 input int             InpLookback    = 500;        // Jumlah bar yang discan
 
 input group "=== Style Pivot ==="
-input ENUM_PIVOT_SYMBOL InpPivotSymbol = PIVOT_ARROW; // Simbol penanda
-input color             InpPivotColor  = clrYellow;   // Warna penanda
-input int               InpGapPips     = 5;           // Offset (pips). Nanti dipakai juga untuk jarak ujung Base ke Atap/Lantai
+input ENUM_PIVOT_MARK InpPivotSymbol = MARK_LOZENGE_SM; // Simbol penanda
+input color           InpPivotColor  = clrYellow;       // Warna penanda
+input int             InpGapPips     = 5;               // Offset (pips). Nanti dipakai juga untuk jarak ujung Base ke Atap/Lantai
 
 //+------------------------------------------------------------------+
 //| CONST                                                            |
@@ -101,14 +104,10 @@ bool IsRed(const MqlRates &r)   { return(r.close < r.open); }
 //+------------------------------------------------------------------+
 int PivotArrowCode(const bool isBuy)
   {
-   switch(InpPivotSymbol)
-     {
-      case PIVOT_TRIANGLE: return(isBuy ? 241 : 242);
-      case PIVOT_DOT:      return(159);
-      case PIVOT_DIAMOND:  return(117);
-      case PIVOT_THUMB:    return(isBuy ? 67 : 68);
-      default:             return(isBuy ? 233 : 234);
-     }
+   int code = (int)InpPivotSymbol;
+   if(!isBuy && (InpPivotSymbol == MARK_ARROW || InpPivotSymbol == MARK_TRIANGLE))
+      code++;
+   return(code);
   }
 
 //+------------------------------------------------------------------+
