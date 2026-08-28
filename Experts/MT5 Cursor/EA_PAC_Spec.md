@@ -27,36 +27,68 @@
 
 ---
 
-## 2. DETEKSI CONTROL (BASE)
+## 2. DETEKSI CONTROL (ZONA BASE)
 
-### 2.1 Definisi Base
-Base = **1 candle tunggal** dengan syarat:
+Control **bukan** 1 candle Base. Control = **zona Base** (grup RBR/DBD + pengecatan) yang sudah **tersentuh Pivot** di kanannya. Geometri zona yang digambar di chart = geometri yang dipakai untuk overlap, Atap, Lantai, dan pelemahan.
+
+### 2.1 Candle Base (penanda putih)
+Candle Base = **1 candle** dengan syarat (tidak peduli tetangga):
 ```
 |Close - Open| ≤ 0.5 × (High - Low)
 ```
-(Body candle maksimal 50% dari total tinggi High-Low candle tersebut)
+Setiap candle yang lolos mendapat garis putih High–Low. Ini belum zona S&D.
 
-### 2.2 RBR (Rally-Base-Rally) — Control untuk Pivot Buy
-- **C1** (candle sebelum Base): minimal 1 candle **hijau** (rally naik)
-- **C2** (Base): candle yang memenuhi syarat 2.1
-- **C3** (candle sesudah Base): minimal 1 candle **hijau** (rally naik lanjut)
-- Base ini sah menjadi **Control** jika ada **Pivot Buy** (di sebelah KANAN Base, lebih belakangan waktu) yang range harganya (High-Low, termasuk wick) **overlap** dengan range Base (High-Low Base), walau hanya 0.1 pips.
+### 2.2 Grup Base / zona RBR dan DBD
+Zona S&D = **satu grup** Candle Base berurutan (1 sampai `InpMaxBaseCandles`, default **10**), diapit **leg kiri dan leg kanan**. Leg milik grup, bukan milik tiap candle.
 
-### 2.3 DBD (Drop-Base-Drop) — Control untuk Pivot Sell
-- **C1**: minimal 1 candle **merah** (drop turun)
-- **C2** (Base): candle yang memenuhi syarat 2.1
-- **C3**: minimal 1 candle **merah** (drop turun lanjut)
-- Sah menjadi Control jika ada **Pivot Sell** di sebelah kanan Base yang overlap dengan range Base.
+```
+[LEG KIRI]  [Base] [Base] … [Base]  [LEG KANAN]
+               |←—— rectangle zona ——→|
+```
 
-### 2.4 Aturan Pelemahan Control (Base Invalidation)
+- Candle di dalam grup: Candle Base, warna bebas, nempel (tidak terselingi non-Base).
+- **Leg kiri** = candle langsung sebelum Base pertama. **Leg kanan** = candle langsung sesudah Base terakhir (sudah close).
+- Impulse: body ≥ 50% dari High–Low (`IMPULSE_BODY_PCT`). Rally = hijau + impulse. Drop = merah + impulse.
+- Lebih dari `InpMaxBaseCandles` Candle Base nempel → **bukan** zona (chop).
 
-**DBD:**
-Setelah C3, jika muncul candle APAPUN yang **body**-nya (bukan wick) mencapai atau melebihi **High Base (C2)** → Base tersebut dinyatakan **LEMAH**, tidak digunakan lagi sebagai Control untuk validasi PAC baru.
+| Pola | Leg kiri | Leg kanan | Syarat keluar |
+|---|---|---|---|
+| **RBR** (support) | Rally | Rally | `Close leg kanan > High grup` |
+| **DBD** (resisten) | Drop | Drop | `Close leg kanan < Low grup` |
 
-**RBR (simetris):**
-Setelah C3, jika muncul candle yang body-nya mencapai atau melebihi **Low Base (C2)** → Base dinyatakan LEMAH.
+RBD dan DBR **tidak** dipakai. Tinggi zona = Low terendah–High tertinggi seluruh Base di grup (**wick ikut**). Tepi kiri rectangle = Base pertama. Leg kiri/kanan **tidak** masuk kotak.
 
-**Berlaku surut:** Aturan ini berlaku juga untuk Base yang SUDAH menjadi Control valid (sudah tersentuh Pivot, PAC sudah "terbentuk"). Begitu syarat pelemahan terpenuhi, PAC terkait ditandai tidak valid lagi.
+### 2.3 Pengecatan tepi kanan zona
+1. Lewati Base terakhir + leg kanan. Hitungan mulai **Base terakhir + 2**.
+2. Support: mulai cat saat ada candle dengan **Close < High zona**.
+3. Resisten: mulai cat saat ada candle dengan **Close > Low zona**.
+4. Setelah mulai: tiap candle menyumbang **body** (Open–Close) plus **celah Close candle sebelumnya → Open candle ini**, dipotong ke tinggi zona. Wick tidak dihitung.
+5. Kotak berhenti di candle pertama yang membuat cat **nyambung** dari Low sampai High zona (toleransi 1 point). Jika belum penuh, tepi kanan = candle terakhir di window scan.
+
+### 2.4 Control = zona + overlap Pivot
+Zona di 2.3 sah menjadi **Control** jika ada Pivot **di sebelah kanan Base terakhir grup** (waktu Pivot > waktu Base terakhir) yang range High–Low-nya (termasuk wick) **overlap** dengan tinggi zona, walau hanya 0.1 pip:
+
+- Zona **support** (mulai RBR) + **Pivot Buy** overlap → Control (calon **Lantai**)
+- Zona **resisten** (mulai DBD) + **Pivot Sell** overlap → Control (calon **Atap**)
+
+Overlap: `Pivot.Low ≤ Zona.High` DAN `Pivot.High ≥ Zona.Low`.
+
+Zona tanpa Pivot overlap **bukan** Control Aktif — digambar sebagai **Control Standby**, tidak dipakai Atap/Lantai/order.
+
+Penanda rectangle:
+- **Control Standby** — putus-putus, tanpa isi (zona S&D, belum overlap Pivot)
+- **Control Aktif** — isi penuh, garis tebal (overlap Pivot, belum lemah)
+- **Control Off** — titik-titik, tanpa isi (pernah Control, sekarang lemah)
+
+### 2.5 Aturan Pelemahan Control (zona invalidation)
+
+**Resisten (zona DBD / Control Atap):**
+Setelah C3 (leg kanan) Base **terakhir** di grup, jika muncul candle APAPUN yang **body**-nya (bukan wick) mencapai atau melebihi **High zona** → zona dinyatakan **LEMAH**, tidak digunakan lagi sebagai Control untuk validasi PAC baru.
+
+**Support (zona RBR / Control Lantai) — simetris:**
+Setelah C3 Base terakhir, jika muncul candle yang body-nya mencapai atau melebihi **Low zona** → zona dinyatakan LEMAH.
+
+**Berlaku surut:** Aturan ini berlaku juga untuk zona yang SUDAH menjadi Control valid (sudah tersentuh Pivot, PAC sudah "terbentuk"). Begitu syarat pelemahan terpenuhi, PAC terkait ditandai tidak valid lagi.
 
 **Efek operasional terhadap order (PENTING):**
 - Pelemahan Control dicek **per GRUP**, bukan per order individual.
@@ -69,11 +101,11 @@ Setelah C3, jika muncul candle yang body-nya mencapai atau melebihi **Low Base (
 ## 3. AREA ENTRY & EXIT (ATAP & LANTAI)
 
 ### 3.1 Definisi Atap & Lantai
-- **Atap** = garis harga = **High Base** dari Control (DBD) yang tersentuh Pivot Sell dan **masih aktif** (belum lemah, sesuai section 2.4).
-- **Lantai** = garis harga = **Low Base** dari Control (RBR) yang tersentuh Pivot Buy dan **masih aktif**.
+- **Atap** = garis harga = **High zona** dari Control resisten (mulai DBD, tersentuh Pivot Sell) yang **masih aktif** (belum lemah, sesuai section 2.5).
+- **Lantai** = garis harga = **Low zona** dari Control support (mulai RBR, tersentuh Pivot Buy) yang **masih aktif**.
 
 ### 3.2 Pemilihan Pasangan Atap-Lantai
-EA melakukan scan otomatis terhadap seluruh Base RBR/DBD yang aktif di chart, mencari Pivot yang overlap (sesuai section 2.2/2.3), lalu menentukan **Atap dan Lantai yang TERDEKAT dari harga pasar saat ini** secara otomatis — tanpa perlu approval manual trader.
+EA melakukan scan otomatis terhadap seluruh **Control** aktif di chart (zona 2.3 yang lolos overlap 2.4 dan belum lemah 2.5), lalu menentukan **Atap dan Lantai yang TERDEKAT dari harga pasar saat ini** secara otomatis — tanpa perlu approval manual trader.
 
 ### 3.3 Kasus 1: Pasangan Atap-Lantai Ditemukan, Jarak ≤ N Pips (default 300)
 
@@ -86,8 +118,8 @@ Jika jarak antara Atap dan Lantai **tidak lebih dari `InpMaxAreaWidth`** (defaul
 | **Entry Buy 1** | 50% jarak antara Lantai dan TP: `Lantai + 0.5 × (TP - Lantai)` |
 | **CL Sell** | `Atap + InpCLBuffer pips` (default 10 pips) |
 | **CL Buy** | `Lantai - InpCLBuffer pips` (default 10 pips) |
-| **SL Sell** | Jarak dari Entry Sell 1 ke SL = `InpSLRatio%` × jarak dari Entry Sell 1 ke TP (default 100% = setara ratio 1:1). SL diletakkan di ATAS entry (arah berlawanan dari TP). |
-| **SL Buy** | Sama, `InpSLRatio%` × jarak Entry Buy 1 ke TP, SL di BAWAH entry Buy 1. |
+| **SL Sell** | Jarak SL ke CL = `InpSLRatio%` × jarak CL ke TP (default 100%). `SL = CL + rasio × (CL − TP)`. SL di atas CL. |
+| **SL Buy** | Sama: `SL = CL − rasio × (TP − CL)`. SL di bawah CL. |
 | **Order Layer** (posisi 2, 3, dst) | Diletakkan **antara Entry 1 dan Atap/Lantai** — gunakan logika pembagian proporsional yang sama seperti EA Panbes (jarak dibagi rata sesuai jumlah layer). |
 | **TP/SL/CL Layer** | SAMA PERSIS dengan Entry 1 (mengikuti mekanisme flat seperti Panbes). |
 
@@ -104,7 +136,7 @@ Jika hanya ditemukan salah satu (Atap saja, atau Lantai saja, tanpa pasangannya 
 | **Entry Buy 1** | Sama seperti Kasus 1: 50% jarak antara Lantai dan TP. |
 | **CL Sell** | Sama seperti Kasus 1: `Atap + InpCLBuffer pips`. |
 | **CL Buy** | Sama seperti Kasus 1: `Lantai - InpCLBuffer pips`. |
-| **SL Sell/Buy** | Sama seperti Kasus 1: `InpSLRatio%` × jarak Entry 1 ke TP. |
+| **SL Sell/Buy** | Sama seperti Kasus 1: `InpSLRatio%` × jarak CL ke TP. |
 | **Order Layer & TP/SL/CL Layer** | Sama seperti Kasus 1. |
 
 Singkatnya: **seluruh rumus Kasus 2 identik dengan Kasus 1**, satu-satunya perbedaan adalah cara TP ditentukan (titik tengah Atap-Lantai untuk Kasus 1, vs setengah `InpMaxAreaWidth` dari sisi yang ditemukan untuk Kasus 2 — karena tidak ada pasangan untuk dihitung titik tengahnya).
@@ -114,7 +146,7 @@ Singkatnya: **seluruh rumus Kasus 2 identik dengan Kasus 1**, satu-satunya perbe
 input int    InpMaxAreaWidth = 300;  // Jarak maksimal Atap-Lantai (pips) untuk Kasus 1.
                                       // Kasus 2 otomatis pakai setengah nilai ini (150) sebagai jarak TP.
 input int    InpCLBuffer     = 10;   // Buffer CL dari Atap/Lantai (pips)
-input int    InpSLRatio      = 100;  // Rasio SL terhadap jarak Entry-ke-TP, dalam persen (default 100% = ratio 1:1)
+input int    InpSLRatio      = 100;  // Rasio (SL−CL) terhadap (CL−TP), persen (default 100%)
 ```
 
 ---
