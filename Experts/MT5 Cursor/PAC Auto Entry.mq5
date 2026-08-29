@@ -4,7 +4,7 @@
 //|  Reentry setelah TP. CLCC close candle, bukan SL sentuh.         |
 //+------------------------------------------------------------------+
 #property copyright "PAC Auto Entry"
-#property version   "1.00"
+#property version   "1.01"
 #property description "PAC Auto Entry — Pivot, Base, Control, pending, CLCC, reentry"
 
 #include <Trade/Trade.mqh>
@@ -77,10 +77,19 @@ input int InpSLRatio      = 100; // Rasio SL-CL vs CL-TP (%)
 input int InpLayerCount   = 3;   // Jumlah layer
 
 input group "=== Order ==="
-input bool   InpSendOrders      = true; // Kirim pending otomatis
-input double InpLot             = 0.01; // Lot per layer
+input bool   InpSendOrders        = true; // Kirim pending otomatis
+input double InpLot               = 0.01; // Lot dasar (layer 1 / jauh dari CL)
+input bool   InpLotStepUp         = true; // Lot bertingkat jika layer > 1 (terbesar dekat CL)
+input int    InpMaxGroupsPerSide  = 2;    // Maks grup per arah (Buy/Sell)
+input int    InpMaxPivotTouches   = 3;    // Maks sentuhan pivot (termasuk yg mengaktifkan)
 input bool   InpAlertOnCL       = false; // Alert saat CLCC
 input bool   InpAlertOnReentry  = false; // Alert saat reentry
+input int    InpMaxReentry      = 3;     // Maks reentry per grup setelah TP
+
+input group "=== News ==="
+input bool InpNewsFilter     = true; // Filter berita USD high-impact Investing (hardcode Jan-Agu 2026)
+input int  InpNewsMinsBefore = 30;   // Menit sebelum rilis
+input int  InpNewsMinsAfter  = 60;   // Menit sesudah rilis
 
 //+------------------------------------------------------------------+
 //| CONST                                                            |
@@ -95,11 +104,13 @@ const string PREFIX_RES    = "PAC_RES_";
 const string PREFIX_ATAP   = "PAC_ATAP";
 const string PREFIX_LANTAI = "PAC_LANTAI";
 const string PREFIX_LV     = "PAC_LV_";
-const double BASE_BODY_RATIO  = 0.5; // |Close-Open| ≤ rasio × (High-Low)
+const string PREFIX_NEWS   = "PAC_NEWS_";
+const color  NEWS_CLR_ON   = clrOrangeRed;      // jendela aktif
+const color  NEWS_CLR_OFF  = clrMediumSeaGreen; // jendela inaktif
+const double BASE_BODY_RATIO  = 0.5; // |Close-Open| â‰¤ rasio Ã— (High-Low)
 const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low)
 const long   InpMagic         = 999; // Magic Number EA PAC (bukan 0)
 const int    InpDeviation     = 30;
-const int    InpMaxReentry    = 3;
 const int    InpTpWindowMs    = 1000;
 
 struct Pivot
@@ -134,6 +145,7 @@ struct SrZone
    bool     isControl;
    bool     isWeak;
    datetime pivotTime;
+   int      pivotTouches;
   };
 
 struct PacCmt
@@ -225,6 +237,13 @@ bool             g_inRefresh = false;
 string           g_clccGroup = "";
 double           g_clccCl[];
 bool             g_clccBuy[];
+string           g_lastNewsName = "";
+datetime         g_newsUtc[];
+string           g_newsName[];
+datetime         g_newsCacheFrom  = 0;
+datetime         g_newsCacheUntil = 0;
+bool             g_newsCacheIn    = false;
+string           g_newsCacheName  = "";
 
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES DetectionTF()
@@ -232,6 +251,586 @@ ENUM_TIMEFRAMES DetectionTF()
    if(InpDetectionTF == TF_AUTO)
       return((ENUM_TIMEFRAMES)Period());
    return((ENUM_TIMEFRAMES)InpDetectionTF);
+  }
+
+//+------------------------------------------------------------------+
+bool ChartVisualsOn()
+  {
+   if(MQLInfoInteger(MQL_OPTIMIZATION) != 0)
+      return(false);
+   if(MQLInfoInteger(MQL_TESTER) != 0 && MQLInfoInteger(MQL_VISUAL_MODE) == 0)
+      return(false);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| News USD high-impact Investing.com (filter High Volatility, USD).|
+//| Jam rilis UTC. Filter & garis chart sama: jam server HFM.        |
+//| Sumber: Investing calendar 1 Jan-31 Agu 2026 + BLS/BEA/Fed.      |
+//+------------------------------------------------------------------+
+int NewsCount()
+  {
+   return(ArraySize(g_newsUtc));
+  }
+
+//+------------------------------------------------------------------+
+datetime NewsTimeUtc(const int i)
+  {
+   if(i < 0 || i >= ArraySize(g_newsUtc))
+      return(0);
+   return(g_newsUtc[i]);
+  }
+
+//+------------------------------------------------------------------+
+string NewsLabel(const int i)
+  {
+   if(i < 0 || i >= ArraySize(g_newsName))
+      return("");
+   return(g_newsName[i]);
+  }
+
+//+------------------------------------------------------------------+
+string NewsMajorText(const int i)
+  {
+   const string n = NewsLabel(i);
+   if(n == "")
+      return("");
+   return("Major: " + n);
+  }
+
+//+------------------------------------------------------------------+
+void AddNews(const datetime t, const string name)
+  {
+   if(t <= 0 || name == "")
+      return;
+   const int n = ArraySize(g_newsUtc);
+   ArrayResize(g_newsUtc, n + 1);
+   ArrayResize(g_newsName, n + 1);
+   g_newsUtc[n]  = t;
+   g_newsName[n] = name;
+  }
+
+//+------------------------------------------------------------------+
+void InvalidateNewsCache()
+  {
+   g_newsCacheFrom  = 0;
+   g_newsCacheUntil = 0;
+   g_newsCacheIn    = false;
+   g_newsCacheName  = "";
+  }
+
+//+------------------------------------------------------------------+
+void RefreshNewsCache(const datetime now)
+  {
+   g_newsCacheFrom  = now;
+   g_newsCacheUntil = now + 86400;
+   g_newsCacheIn    = false;
+   g_newsCacheName  = "";
+   const int before = MathMax(InpNewsMinsBefore, 0) * 60;
+   const int after  = MathMax(InpNewsMinsAfter, 0) * 60;
+   const int n = NewsCount();
+   datetime nextOn = 0;
+   for(int i = 0; i < n; i++)
+     {
+      const datetime utc = NewsTimeUtc(i);
+      if(utc <= 0)
+         continue;
+      const datetime tOn  = UtcToHfmChart(utc - before);
+      const datetime tOff = UtcToHfmChart(utc + after);
+      if(now >= tOn && now <= tOff)
+        {
+         g_newsCacheUntil = tOff + 1;
+         g_newsCacheIn    = true;
+         g_newsCacheName  = NewsMajorText(i);
+         return;
+        }
+      if(tOn > now && (nextOn == 0 || tOn < nextOn))
+         nextOn = tOn;
+     }
+   if(nextOn > now)
+      g_newsCacheUntil = nextOn;
+  }
+
+//+------------------------------------------------------------------+
+void InitNewsCalendar()
+  {
+   InvalidateNewsCache();
+   ArrayResize(g_newsUtc, 0);
+   ArrayResize(g_newsName, 0);
+   AddNews(D'2026.01.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.01.05 15:00:00', "ISM Mfg");
+   AddNews(D'2026.01.06 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.01.07 13:15:00', "ADP");
+   AddNews(D'2026.01.07 15:00:00', "ISM Svc");
+   AddNews(D'2026.01.07 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.08 13:30:00', "Claims");
+   AddNews(D'2026.01.09 13:30:00', "NFP");
+   AddNews(D'2026.01.12 18:00:00', "10Y Auction");
+   AddNews(D'2026.01.13 13:30:00', "CPI");
+   AddNews(D'2026.01.13 14:59:00', "New Homes");
+   AddNews(D'2026.01.13 15:00:00', "New Homes");
+   AddNews(D'2026.01.13 18:00:00', "30Y Auction");
+   AddNews(D'2026.01.13 19:00:00', "Trump");
+   AddNews(D'2026.01.14 13:29:00', "PPI");
+   AddNews(D'2026.01.14 13:30:00', "Retail Sales");
+   AddNews(D'2026.01.14 15:00:00', "Existing Homes");
+   AddNews(D'2026.01.14 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.15 13:30:00', "Claims");
+   AddNews(D'2026.01.21 13:30:00', "Trump");
+   AddNews(D'2026.01.22 13:30:00', "GDP");
+   AddNews(D'2026.01.22 14:59:00', "PCE");
+   AddNews(D'2026.01.22 15:00:00', "PCE");
+   AddNews(D'2026.01.22 17:00:00', "Oil Inv");
+   AddNews(D'2026.01.23 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.01.26 13:30:00', "Durable Goods");
+   AddNews(D'2026.01.27 15:00:00', "CB Confidence");
+   AddNews(D'2026.01.27 21:00:00', "Trump");
+   AddNews(D'2026.01.28 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.28 19:00:00', "FOMC");
+   AddNews(D'2026.01.28 19:30:00', "FOMC Press");
+   AddNews(D'2026.01.29 13:30:00', "Claims");
+   AddNews(D'2026.01.29 21:30:00', "Trump");
+   AddNews(D'2026.01.30 13:30:00', "PPI");
+   AddNews(D'2026.01.30 14:45:00', "Chicago PMI");
+   AddNews(D'2026.02.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.02.02 15:00:00', "ISM Mfg");
+   AddNews(D'2026.02.04 13:15:00', "ADP");
+   AddNews(D'2026.02.04 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.02.04 15:00:00', "ISM Svc");
+   AddNews(D'2026.02.04 15:30:00', "Oil Inv");
+   AddNews(D'2026.02.05 13:30:00', "Claims");
+   AddNews(D'2026.02.05 15:00:00', "JOLTS");
+   AddNews(D'2026.02.06 00:00:00', "Trump");
+   AddNews(D'2026.02.10 13:30:00', "Retail Sales");
+   AddNews(D'2026.02.11 13:30:00', "NFP");
+   AddNews(D'2026.02.11 15:30:00', "Oil Inv");
+   AddNews(D'2026.02.11 18:00:00', "10Y Auction");
+   AddNews(D'2026.02.12 13:30:00', "Claims");
+   AddNews(D'2026.02.12 15:00:00', "Existing Homes");
+   AddNews(D'2026.02.12 18:00:00', "30Y Auction");
+   AddNews(D'2026.02.13 13:30:00', "CPI");
+   AddNews(D'2026.02.18 13:30:00', "Durable Goods");
+   AddNews(D'2026.02.18 19:00:00', "FOMC Minutes");
+   AddNews(D'2026.02.19 13:30:00', "Claims");
+   AddNews(D'2026.02.19 17:00:00', "Oil Inv");
+   AddNews(D'2026.02.20 13:30:00', "PCE");
+   AddNews(D'2026.02.20 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.02.20 14:59:00', "New Homes");
+   AddNews(D'2026.02.20 15:00:00', "New Homes");
+   AddNews(D'2026.02.20 17:45:00', "Trump");
+   AddNews(D'2026.02.24 15:00:00', "CB Confidence");
+   AddNews(D'2026.02.25 02:00:00', "Trump");
+   AddNews(D'2026.02.25 15:30:00', "Oil Inv");
+   AddNews(D'2026.02.26 13:30:00', "Claims");
+   AddNews(D'2026.02.27 13:30:00', "PPI");
+   AddNews(D'2026.02.27 14:45:00', "Chicago PMI");
+   AddNews(D'2026.03.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.03.02 15:00:00', "ISM Mfg");
+   AddNews(D'2026.03.02 16:00:00', "Trump");
+   AddNews(D'2026.03.04 13:15:00', "ADP");
+   AddNews(D'2026.03.04 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.03.04 15:00:00', "ISM Svc");
+   AddNews(D'2026.03.04 15:30:00', "Oil Inv");
+   AddNews(D'2026.03.05 13:30:00', "Claims");
+   AddNews(D'2026.03.06 13:30:00', "NFP");
+   AddNews(D'2026.03.10 14:00:00', "Existing Homes");
+   AddNews(D'2026.03.11 12:30:00', "CPI");
+   AddNews(D'2026.03.11 14:30:00', "Oil Inv");
+   AddNews(D'2026.03.11 17:00:00', "10Y Auction");
+   AddNews(D'2026.03.11 20:25:00', "Trump");
+   AddNews(D'2026.03.12 12:30:00', "Claims");
+   AddNews(D'2026.03.12 17:00:00', "30Y Auction");
+   AddNews(D'2026.03.13 12:30:00', "PCE");
+   AddNews(D'2026.03.13 14:00:00', "JOLTS");
+   AddNews(D'2026.03.16 15:30:00', "Trump");
+   AddNews(D'2026.03.17 15:30:00', "Trump");
+   AddNews(D'2026.03.18 12:30:00', "PPI");
+   AddNews(D'2026.03.18 14:30:00', "Oil Inv");
+   AddNews(D'2026.03.18 18:00:00', "FOMC");
+   AddNews(D'2026.03.18 18:30:00', "FOMC Press");
+   AddNews(D'2026.03.19 12:30:00', "Claims");
+   AddNews(D'2026.03.19 14:00:00', "New Homes");
+   AddNews(D'2026.03.21 14:30:00', "Fed Chair");
+   AddNews(D'2026.03.23 13:30:00', "Trump");
+   AddNews(D'2026.03.24 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.03.25 14:30:00', "Oil Inv");
+   AddNews(D'2026.03.25 23:20:00', "Trump");
+   AddNews(D'2026.03.26 12:30:00', "Claims");
+   AddNews(D'2026.03.26 19:00:00', "Trump");
+   AddNews(D'2026.03.26 20:00:00', "Trump");
+   AddNews(D'2026.03.27 21:30:00', "Trump");
+   AddNews(D'2026.03.29 22:30:00', "Trump");
+   AddNews(D'2026.03.30 14:30:00', "Fed Chair");
+   AddNews(D'2026.03.31 13:45:00', "Chicago PMI");
+   AddNews(D'2026.03.31 14:00:00', "JOLTS");
+   AddNews(D'2026.04.01 12:15:00', "ADP");
+   AddNews(D'2026.04.01 12:30:00', "Retail Sales");
+   AddNews(D'2026.04.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.04.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.04.01 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.02 01:00:00', "Trump");
+   AddNews(D'2026.04.02 12:30:00', "Claims");
+   AddNews(D'2026.04.03 12:30:00', "NFP");
+   AddNews(D'2026.04.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.04.06 14:00:00', "ISM Svc");
+   AddNews(D'2026.04.06 17:00:00', "Trump");
+   AddNews(D'2026.04.07 12:30:00', "Durable Goods");
+   AddNews(D'2026.04.08 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.08 17:00:00', "10Y Auction");
+   AddNews(D'2026.04.08 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.04.09 12:30:00', "PCE");
+   AddNews(D'2026.04.09 17:00:00', "30Y Auction");
+   AddNews(D'2026.04.10 12:30:00', "CPI");
+   AddNews(D'2026.04.13 14:00:00', "Existing Homes");
+   AddNews(D'2026.04.14 12:30:00', "PPI");
+   AddNews(D'2026.04.15 10:00:00', "Trump");
+   AddNews(D'2026.04.15 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.16 12:30:00', "Claims");
+   AddNews(D'2026.04.16 23:00:00', "Trump");
+   AddNews(D'2026.04.17 18:00:00', "Trump");
+   AddNews(D'2026.04.21 12:30:00', "Retail Sales");
+   AddNews(D'2026.04.22 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.23 12:30:00', "Claims");
+   AddNews(D'2026.04.23 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.04.25 16:00:00', "Trump");
+   AddNews(D'2026.04.26 02:45:00', "Trump");
+   AddNews(D'2026.04.26 23:00:00', "Trump");
+   AddNews(D'2026.04.28 14:00:00', "CB Confidence");
+   AddNews(D'2026.04.29 12:30:00', "Durable Goods");
+   AddNews(D'2026.04.29 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.29 18:00:00', "FOMC");
+   AddNews(D'2026.04.29 18:30:00', "FOMC Press");
+   AddNews(D'2026.04.30 12:30:00', "PCE");
+   AddNews(D'2026.04.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.05.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.05.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.05.01 19:00:00', "Trump");
+   AddNews(D'2026.05.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.05.05 13:59:00', "New Homes");
+   AddNews(D'2026.05.05 14:00:00', "ISM Svc");
+   AddNews(D'2026.05.06 12:15:00', "ADP");
+   AddNews(D'2026.05.06 14:30:00', "Oil Inv");
+   AddNews(D'2026.05.07 12:30:00', "Claims");
+   AddNews(D'2026.05.08 12:30:00', "NFP");
+   AddNews(D'2026.05.08 16:00:00', "Trump");
+   AddNews(D'2026.05.11 14:00:00', "Existing Homes");
+   AddNews(D'2026.05.12 12:30:00', "CPI");
+   AddNews(D'2026.05.12 17:00:00', "10Y Auction");
+   AddNews(D'2026.05.13 12:30:00', "PPI");
+   AddNews(D'2026.05.13 14:30:00', "Oil Inv");
+   AddNews(D'2026.05.13 17:00:00', "30Y Auction");
+   AddNews(D'2026.05.14 12:30:00', "Retail Sales");
+   AddNews(D'2026.05.20 14:30:00', "Oil Inv");
+   AddNews(D'2026.05.20 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.05.21 12:30:00', "Claims");
+   AddNews(D'2026.05.21 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.05.26 14:00:00', "CB Confidence");
+   AddNews(D'2026.05.28 12:30:00', "PCE");
+   AddNews(D'2026.05.28 14:00:00', "New Homes");
+   AddNews(D'2026.05.28 16:00:00', "Oil Inv");
+   AddNews(D'2026.05.29 13:45:00', "Chicago PMI");
+   AddNews(D'2026.06.01 00:30:00', "Fed Chair");
+   AddNews(D'2026.06.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.06.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.06.02 14:00:00', "JOLTS");
+   AddNews(D'2026.06.03 12:15:00', "ADP");
+   AddNews(D'2026.06.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.06.03 14:00:00', "ISM Svc");
+   AddNews(D'2026.06.03 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.04 12:30:00', "Claims");
+   AddNews(D'2026.06.04 19:00:00', "Trump");
+   AddNews(D'2026.06.05 12:30:00', "NFP");
+   AddNews(D'2026.06.09 14:00:00', "Existing Homes");
+   AddNews(D'2026.06.10 12:30:00', "CPI");
+   AddNews(D'2026.06.10 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.10 17:00:00', "10Y Auction");
+   AddNews(D'2026.06.11 12:30:00', "PPI");
+   AddNews(D'2026.06.17 12:30:00', "Retail Sales");
+   AddNews(D'2026.06.17 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.17 14:45:00', "Trump");
+   AddNews(D'2026.06.17 18:00:00', "FOMC");
+   AddNews(D'2026.06.17 18:30:00', "FOMC Press");
+   AddNews(D'2026.06.18 12:30:00', "Claims");
+   AddNews(D'2026.06.23 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.06.23 18:05:00', "Trump");
+   AddNews(D'2026.06.24 14:00:00', "New Homes");
+   AddNews(D'2026.06.24 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.25 00:30:00', "Trump");
+   AddNews(D'2026.06.25 12:30:00', "PCE");
+   AddNews(D'2026.06.26 17:30:00', "Trump");
+   AddNews(D'2026.06.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.06.30 14:00:00', "JOLTS");
+   AddNews(D'2026.07.01 12:15:00', "ADP");
+   AddNews(D'2026.07.01 13:00:00', "Fed Chair");
+   AddNews(D'2026.07.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.07.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.07.01 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.01 19:15:00', "Trump");
+   AddNews(D'2026.07.02 12:30:00', "NFP");
+   AddNews(D'2026.07.06 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.07.06 14:00:00', "ISM Svc");
+   AddNews(D'2026.07.08 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.08 17:00:00', "10Y Auction");
+   AddNews(D'2026.07.08 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.07.09 12:30:00', "Claims");
+   AddNews(D'2026.07.09 14:00:00', "Existing Homes");
+   AddNews(D'2026.07.09 17:01:00', "30Y Auction");
+   AddNews(D'2026.07.10 15:00:00', "Fed Monetary Policy Report");
+   AddNews(D'2026.07.14 12:30:00', "CPI");
+   AddNews(D'2026.07.15 12:30:00', "PPI");
+   AddNews(D'2026.07.15 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.16 12:30:00', "Retail Sales");
+   AddNews(D'2026.07.17 01:00:00', "Trump");
+   AddNews(D'2026.07.22 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.22 19:00:00', "Trump");
+   AddNews(D'2026.07.23 12:30:00', "Claims");
+   AddNews(D'2026.07.24 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.07.24 14:00:00', "New Homes");
+   AddNews(D'2026.07.25 00:55:00', "Trump");
+   AddNews(D'2026.07.27 12:30:00', "Durable Goods");
+   AddNews(D'2026.07.27 18:50:00', "Trump");
+   AddNews(D'2026.07.28 14:00:00', "CB Confidence");
+   AddNews(D'2026.07.29 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.29 18:00:00', "FOMC");
+   AddNews(D'2026.07.29 18:30:00', "FOMC Press");
+   AddNews(D'2026.07.30 12:30:00', "PCE");
+   AddNews(D'2026.07.31 13:45:00', "Chicago PMI");
+   AddNews(D'2026.08.03 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.08.03 14:00:00', "ISM Mfg");
+   AddNews(D'2026.08.04 14:00:00', "JOLTS");
+   AddNews(D'2026.08.05 12:15:00', "ADP");
+   AddNews(D'2026.08.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.08.05 14:00:00', "ISM Svc");
+   AddNews(D'2026.08.05 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.05 20:30:00', "Trump");
+   AddNews(D'2026.08.06 12:30:00', "Claims");
+   AddNews(D'2026.08.07 12:30:00', "NFP");
+   AddNews(D'2026.08.11 14:00:00', "Existing Homes");
+   AddNews(D'2026.08.12 12:30:00', "CPI");
+   AddNews(D'2026.08.12 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.12 17:00:00', "10Y Auction");
+   AddNews(D'2026.08.13 12:30:00', "PPI");
+   AddNews(D'2026.08.13 17:00:00', "30Y Auction");
+   AddNews(D'2026.08.14 12:30:00', "Retail Sales");
+   AddNews(D'2026.08.14 19:00:00', "Trump");
+   AddNews(D'2026.08.19 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.19 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.08.19 18:30:00', "Trump");
+   AddNews(D'2026.08.20 12:30:00', "Claims");
+   AddNews(D'2026.08.21 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.08.21 23:00:00', "Trump");
+   AddNews(D'2026.08.25 14:00:00', "CB Confidence");
+   AddNews(D'2026.08.26 12:30:00', "PCE");
+   AddNews(D'2026.08.26 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.27 12:30:00', "Claims");
+   AddNews(D'2026.08.28 13:45:00', "Chicago PMI");
+   AddNews(D'2026.08.28 14:00:00', "Fed Chair");
+   AddNews(D'2026.08.31 13:45:00', "Chicago PMI");
+  }
+
+//+------------------------------------------------------------------+
+datetime LastSundayOfMonth(const int year, const int month)
+  {
+   MqlDateTime dt;
+   ZeroMemory(dt);
+   if(month == 12)
+     {
+      dt.year = year + 1;
+      dt.mon  = 1;
+     }
+   else
+     {
+      dt.year = year;
+      dt.mon  = month + 1;
+     }
+   dt.day = 1;
+   datetime t = StructToTime(dt) - 86400;
+   TimeToStruct(t, dt);
+   while(dt.day_of_week != 0)
+     {
+      t -= 86400;
+      TimeToStruct(t, dt);
+     }
+   return(t);
+  }
+
+//+------------------------------------------------------------------+
+//| Offset jam server HFM vs UTC pada timestamp UTC.                 |
+//+------------------------------------------------------------------+
+int HfmOffsetHours(const datetime utc)
+  {
+   if(utc <= 0)
+      return(2);
+   MqlDateTime dt;
+   TimeToStruct(utc, dt);
+   const datetime dstOn  = LastSundayOfMonth(dt.year, 3)  + 3600;
+   const datetime dstOff = LastSundayOfMonth(dt.year, 10) + 3600;
+   if(utc >= dstOn && utc < dstOff)
+      return(3);
+   return(2);
+  }
+
+//+------------------------------------------------------------------+
+datetime UtcToHfmChart(const datetime utc)
+  {
+   if(utc <= 0)
+      return(0);
+   return(utc + (datetime)HfmOffsetHours(utc) * 3600);
+  }
+
+//+------------------------------------------------------------------+
+bool InNewsWindow(string &nameOut)
+  {
+   nameOut = "";
+   if(!InpNewsFilter)
+      return(false);
+   const datetime now = TimeCurrent();
+   if(now <= 0)
+      return(false);
+   if(g_newsCacheUntil <= 0 || now < g_newsCacheFrom || now >= g_newsCacheUntil)
+      RefreshNewsCache(now);
+   nameOut = g_newsCacheName;
+   return(g_newsCacheIn);
+  }
+
+//+------------------------------------------------------------------+
+void CreateNewsVLine(const string name, const datetime t, const color clr,
+                     const ENUM_LINE_STYLE style, const string tip)
+  {
+   if(t <= 0)
+      return;
+   if(ObjectFind(0, name) >= 0)
+      ObjectDelete(0, name);
+   if(!ObjectCreate(0, name, OBJ_VLINE, 0, t, 0))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+  }
+
+//+------------------------------------------------------------------+
+double NewsLabelPrice(const datetime t)
+  {
+   if(t > 0)
+     {
+      const int sh = iBarShift(_Symbol, PERIOD_CURRENT, t, false);
+      if(sh >= 0)
+        {
+         const double h = iHigh(_Symbol, PERIOD_CURRENT, sh);
+         if(h > 0.0)
+            return(h);
+        }
+     }
+   const double pmax = ChartGetDouble(0, CHART_PRICE_MAX);
+   if(pmax > 0.0)
+      return(pmax);
+   return(SymbolInfoDouble(_Symbol, SYMBOL_BID));
+  }
+
+//+------------------------------------------------------------------+
+void CreateNewsLabel(const string name, const datetime t, const string text)
+  {
+   if(t <= 0 || text == "")
+      return;
+   if(ObjectFind(0, name) >= 0)
+      ObjectDelete(0, name);
+   if(!ObjectCreate(0, name, OBJ_TEXT, 0, t, NewsLabelPrice(t)))
+      return;
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, NEWS_CLR_ON);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, text);
+  }
+
+//+------------------------------------------------------------------+
+void DeleteNewsMarks()
+  {
+   ObjectsDeleteAll(0, PREFIX_NEWS);
+  }
+
+//+------------------------------------------------------------------+
+void DrawNewsMarks()
+  {
+   DeleteNewsMarks();
+   if(!InpNewsFilter || !ChartVisualsOn())
+      return;
+   const int before = MathMax(InpNewsMinsBefore, 0) * 60;
+   const int after  = MathMax(InpNewsMinsAfter, 0) * 60;
+   const int n = NewsCount();
+   for(int i = 0; i < n; i++)
+     {
+      const datetime utc = NewsTimeUtc(i);
+      if(utc <= 0)
+         continue;
+      const string major = NewsMajorText(i);
+      const datetime tRel = UtcToHfmChart(utc);
+      const datetime tOn  = UtcToHfmChart(utc - before);
+      const datetime tOff = UtcToHfmChart(utc + after);
+      const string id = IntegerToString(i);
+      CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, NEWS_CLR_ON, STYLE_DASH,
+                      major + " | jendela aktif");
+      CreateNewsVLine(PREFIX_NEWS + "OFF_" + id, tOff, NEWS_CLR_OFF, STYLE_DOT,
+                      major + " | jendela inaktif");
+      CreateNewsLabel(PREFIX_NEWS + "LB_" + id, tRel, major);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CancelNewsPendings()
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol)
+         continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+      const string cmt = OrderGetString(ORDER_COMMENT);
+      if(g_trade.OrderDelete(ticket) && TradeOk())
+         Print("PAC news: hapus pending ", cmt);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CloseNewsPositions()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      const string cmt = PositionGetString(POSITION_COMMENT);
+      if(g_trade.PositionClose(ticket) && TradeOk())
+         Print("PAC news: tutup posisi #", ticket, " ", cmt);
+      else
+         Print("PAC news: gagal tutup #", ticket, " ret=",
+               g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+     }
+  }
+
+//+------------------------------------------------------------------+
+void FlattenNewsExposure()
+  {
+   ArrayResize(g_tpBatches, 0);
+   CloseNewsPositions();
+   CancelNewsPendings();
   }
 
 //+------------------------------------------------------------------+
@@ -264,12 +863,20 @@ int OnInit()
    ArrayResize(g_processedDeals, 0);
    ArrayResize(g_clccCl, 0);
    ArrayResize(g_clccBuy, 0);
+   g_lastNewsName = "";
+   InitNewsCalendar();
 
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       Print("PAC: akun bukan hedging — layer bisa tergabung.");
+   if(InpNewsFilter)
+      Print("PAC news filter ON. Tutup posisi + hapus pending. Jendela ",
+            InpNewsMinsBefore, " mnt sebelum / ", InpNewsMinsAfter,
+            " mnt sesudah rilis. Hardcode Investing high-impact USD ",
+            IntegerToString(NewsCount()), " event, 1 Jan-31 Agu 2026. Filter & garis chart jam HFM.");
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
+   DrawNewsMarks();
    g_lastBarTime = iTime(_Symbol, g_usedTF, 0);
    ManageOrders();
    if(!EventSetTimer(1))
@@ -282,12 +889,13 @@ void OnDeinit(const int reason)
   {
    EventKillTimer();
    DeleteMarks();
+   DeleteNewsMarks();
   }
 
 //+------------------------------------------------------------------+
 void OnTimer()
   {
-   ManageOrders();
+   ManageFast();
   }
 
 //+------------------------------------------------------------------+
@@ -302,13 +910,28 @@ void OnTick()
      }
 
    const datetime barTime = iTime(_Symbol, tf, 0);
-   if(barTime != 0 && barTime != g_lastBarTime)
-     {
-      ManageOrders();
+   const bool newBar = (barTime != 0 && barTime != g_lastBarTime);
+   if(newBar)
       g_lastBarTime = barTime;
+
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   ApplyNewsFilter();
+   if(newBar)
+      RefreshGroupsAndClcc();
+   g_inRefresh = false;
+
+   if(newBar)
       ScanAndDraw();
-     }
-   ManageOrders();
+
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   if(newBar)
+      ApplyPivotCapAndSlots();
+   ProcessTpBatches();
+   g_inRefresh = false;
   }
 
 //+------------------------------------------------------------------+
@@ -332,7 +955,8 @@ void ScanAndDraw()
    DrawBases();
    DrawSrZones();
    DrawAtapLantai();
-   ChartRedraw(0);
+   if(ChartVisualsOn())
+      ChartRedraw(0);
   }
 
 //+------------------------------------------------------------------+
@@ -651,9 +1275,10 @@ void AddSrZone(const datetime left, const datetime right, const datetime lastBas
    g_zones[n].high      = hi;
    g_zones[n].low       = lo;
    g_zones[n].isSupport = isSupport;
-   g_zones[n].isControl = false;
-   g_zones[n].isWeak    = false;
-   g_zones[n].pivotTime = 0;
+   g_zones[n].isControl    = false;
+   g_zones[n].isWeak       = false;
+   g_zones[n].pivotTime    = 0;
+   g_zones[n].pivotTouches = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -792,10 +1417,13 @@ void MarkControls()
    const int np = ArraySize(g_pivots);
    for(int z = 0; z < nz; z++)
      {
-      g_zones[z].isControl = false;
-      g_zones[z].pivotTime = 0;
+      g_zones[z].isControl    = false;
+      g_zones[z].pivotTime    = 0;
+      g_zones[z].pivotTouches = 0;
       const ENUM_PIVOT_TYPE need = g_zones[z].isSupport ? PIVOT_BUY : PIVOT_SELL;
-      for(int p = np - 1; p >= 0; p--)
+      datetime lastPt = 0;
+      int touches = 0;
+      for(int p = 0; p < np; p++)
         {
          if(g_pivots[p].type != need)
             continue;
@@ -804,16 +1432,22 @@ void MarkControls()
          if(!RangesOverlap(g_pivots[p].high, g_pivots[p].low,
                            g_zones[z].high, g_zones[z].low))
             continue;
-         g_zones[z].isControl = true;
-         g_zones[z].pivotTime = g_pivots[p].time;
-         break;
+         touches++;
+         lastPt = g_pivots[p].time;
         }
+      if(touches <= 0)
+         continue;
+      g_zones[z].isControl    = true;
+      g_zones[z].pivotTime    = lastPt;
+      g_zones[z].pivotTouches = touches;
      }
   }
 
 //+------------------------------------------------------------------+
 void DrawPivots()
   {
+   if(!ChartVisualsOn())
+      return;
    ObjectsDeleteAll(0, PREFIX_PB);
    ObjectsDeleteAll(0, PREFIX_PS);
 
@@ -857,6 +1491,8 @@ void CreateArrow(const Pivot &p, const double gap)
 //+------------------------------------------------------------------+
 void DrawBases()
   {
+   if(!ChartVisualsOn())
+      return;
    ObjectsDeleteAll(0, PREFIX_BASE);
    ObjectsDeleteAll(0, PREFIX_RBR);
    ObjectsDeleteAll(0, PREFIX_DBD);
@@ -895,6 +1531,8 @@ void CreateBaseLine(const Base &b)
 //+------------------------------------------------------------------+
 void DrawSrZones()
   {
+   if(!ChartVisualsOn())
+      return;
    ObjectsDeleteAll(0, PREFIX_SUP);
    ObjectsDeleteAll(0, PREFIX_RES);
 
@@ -933,6 +1571,8 @@ void CreateSrRect(const SrZone &z)
       const int rk = PivotRank(z.pivotTime, z.isSupport ? PIVOT_BUY : PIVOT_SELL);
       tip += "\nPivot ke-" + IntegerToString(rk) + "  " +
              TimeToString(z.pivotTime, TIME_DATE | TIME_MINUTES);
+      tip += "\nSentuhan pivot " + IntegerToString(z.pivotTouches) + "/" +
+             IntegerToString(MaxPivotTouches());
      }
    ObjectSetString(0, name, OBJPROP_TOOLTIP,
                    StringFormat("%s\n%s -> %s\nH=%s L=%s",
@@ -1022,11 +1662,341 @@ bool ZoneOrderEligible(const SrZone &z)
   {
    if(!z.isControl || z.isWeak)
       return(false);
+   if(z.pivotTouches >= MaxPivotTouches())
+      return(false);
    const bool isBuy = z.isSupport;
    const double cl = isBuy
                      ? NormalizePrice(z.low - MathMax(InpCLBuffer, 0) * PipSize())
                      : NormalizePrice(z.high + MathMax(InpCLBuffer, 0) * PipSize());
    return(!WasClcc(isBuy, cl));
+  }
+
+//+------------------------------------------------------------------+
+int MaxGroupsPerSide()
+  {
+   int n = InpMaxGroupsPerSide;
+   if(n < 1)
+      n = 1;
+   return(n);
+  }
+
+//+------------------------------------------------------------------+
+int MaxPivotTouches()
+  {
+   int n = InpMaxPivotTouches;
+   if(n < 1)
+      n = 1;
+   return(n);
+  }
+
+//+------------------------------------------------------------------+
+void ZoneClTp(const SrZone &z, const double maxW, double &cl, double &tp)
+  {
+   const double pip = PipSize();
+   const double buf = MathMax(InpCLBuffer, 0) * pip;
+   if(z.isSupport)
+     {
+      cl = NormalizePrice(z.low - buf);
+      tp = NormalizePrice(z.low + maxW * 0.5);
+     }
+   else
+     {
+      cl = NormalizePrice(z.high + buf);
+      tp = NormalizePrice(z.high - maxW * 0.5);
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool TpClOverlap(const double clA, const double tpA,
+                 const double clB, const double tpB)
+  {
+   if(clA <= 0.0 || tpA <= 0.0 || clB <= 0.0 || tpB <= 0.0)
+      return(false);
+   const double loA = MathMin(clA, tpA);
+   const double hiA = MathMax(clA, tpA);
+   const double loB = MathMin(clB, tpB);
+   const double hiB = MathMax(clB, tpB);
+   const double eps = MathMax(_Point * 5.0, PipSize() * 0.05);
+   return(loA < hiB - eps && hiA > loB + eps);
+  }
+
+//+------------------------------------------------------------------+
+void CollectPacSideRanges(const bool wantBuy, double &cl[], double &tp[], int &nOut,
+                          const LiveItem &items[])
+  {
+   nOut = 0;
+   ArrayResize(cl, 0);
+   ArrayResize(tp, 0);
+   for(int i = 0; i < ArraySize(items); i++)
+     {
+      if(!items[i].parsed)
+         continue;
+      if(items[i].pac.isBuy != wantBuy)
+         continue;
+      const double c = items[i].pac.clPrice;
+      const double t = items[i].tp;
+      if(c <= 0.0)
+         continue;
+      bool dup = false;
+      for(int k = 0; k < nOut; k++)
+        {
+         if(!SameCl(cl[k], c))
+            continue;
+         if(t > 0.0 && (tp[k] <= 0.0 || MathAbs(t - c) > MathAbs(tp[k] - c)))
+            tp[k] = t;
+         dup = true;
+         break;
+        }
+      if(dup)
+         continue;
+      nOut++;
+      ArrayResize(cl, nOut);
+      ArrayResize(tp, nOut);
+      cl[nOut - 1] = c;
+      tp[nOut - 1] = t;
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool IdxHas(const int &idx[], const int n, const int v)
+  {
+   for(int i = 0; i < n; i++)
+     {
+      if(idx[i] == v)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void CollectNearestZones(const bool wantBuy, const double bid, const double maxW,
+                         int &idx[], int &nOut, double &keepCl[], int &nKeep,
+                         const LiveItem &items[])
+  {
+   nOut  = 0;
+   nKeep = 0;
+   ArrayResize(idx, 0);
+   ArrayResize(keepCl, 0);
+   int    zIdx[];
+   double dist[];
+   double zCl[];
+   double zTp[];
+   int    nCand = 0;
+   const int nz = ArraySize(g_zones);
+   const ENUM_TIMEFRAMES tf = DetectionTF();
+
+   for(int z = 0; z < nz; z++)
+     {
+      if(!ZoneOrderEligible(g_zones[z]))
+         continue;
+      double d = 0.0;
+      double cl = 0.0;
+      double tp = 0.0;
+      ZoneClTp(g_zones[z], maxW, cl, tp);
+      if(wantBuy)
+        {
+         if(!g_zones[z].isSupport || g_zones[z].low > bid)
+            continue;
+         d = bid - g_zones[z].low;
+        }
+      else
+        {
+         if(g_zones[z].isSupport || g_zones[z].high < bid)
+            continue;
+         d = g_zones[z].high - bid;
+        }
+      if(ClBrokenOnClosedBar(wantBuy, cl, tf))
+         continue;
+      nCand++;
+      ArrayResize(zIdx, nCand);
+      ArrayResize(dist, nCand);
+      ArrayResize(zCl, nCand);
+      ArrayResize(zTp, nCand);
+      zIdx[nCand - 1] = z;
+      dist[nCand - 1] = d;
+      zCl[nCand - 1]  = cl;
+      zTp[nCand - 1]  = tp;
+     }
+
+   double oldCl[];
+   double oldTp[];
+   int    nOld = 0;
+   CollectPacSideRanges(wantBuy, oldCl, oldTp, nOld, items);
+
+   bool skip[];
+   ArrayResize(skip, nCand);
+   const double epsW = MathMax(_Point * 5.0, PipSize() * 0.05);
+   for(int i = 0; i < nCand; i++)
+     {
+      skip[i] = false;
+      for(int j = 0; j < nCand; j++)
+        {
+         if(i == j)
+            continue;
+         if(!TpClOverlap(zCl[i], zTp[i], zCl[j], zTp[j]))
+            continue;
+         const double wI = MathAbs(zCl[i] - zTp[i]);
+         const double wJ = MathAbs(zCl[j] - zTp[j]);
+         if(wI < wJ - epsW)
+           {
+            skip[i] = true;
+            break;
+           }
+         if(MathAbs(wI - wJ) <= epsW && dist[i] < dist[j])
+           {
+            skip[i] = true;
+            break;
+           }
+        }
+      if(skip[i])
+         continue;
+      for(int o = 0; o < nOld; o++)
+        {
+         if(TpClOverlap(zCl[i], zTp[i], oldCl[o], oldTp[o]))
+           {
+            skip[i] = true;
+            break;
+           }
+        }
+     }
+
+   int    fIdx[];
+   double fDist[];
+   double fCl[];
+   int    nF = 0;
+   for(int i = 0; i < nCand; i++)
+     {
+      if(skip[i])
+         continue;
+      nF++;
+      ArrayResize(fIdx, nF);
+      ArrayResize(fDist, nF);
+      ArrayResize(fCl, nF);
+      fIdx[nF - 1]  = zIdx[i];
+      fDist[nF - 1] = dist[i];
+      fCl[nF - 1]   = zCl[i];
+     }
+
+   for(int i = 1; i < nF; i++)
+     {
+      for(int j = i; j > 0; j--)
+        {
+         if(fDist[j] >= fDist[j - 1])
+            break;
+         const int    ti = fIdx[j];
+         const double td = fDist[j];
+         const double tc = fCl[j];
+         fIdx[j]      = fIdx[j - 1];
+         fDist[j]     = fDist[j - 1];
+         fCl[j]       = fCl[j - 1];
+         fIdx[j - 1]  = ti;
+         fDist[j - 1] = td;
+         fCl[j - 1]   = tc;
+        }
+     }
+
+   double pCl[];
+   double pDist[];
+   int    nProt = 0;
+   for(int o = 0; o < nOld; o++)
+     {
+      bool already = false;
+      for(int i = 0; i < nF; i++)
+        {
+         if(SameCl(fCl[i], oldCl[o]))
+           {
+            already = true;
+            break;
+           }
+        }
+      if(already)
+         continue;
+      bool protects = false;
+      for(int i = 0; i < nCand; i++)
+        {
+         if(!skip[i])
+            continue;
+         if(TpClOverlap(zCl[i], zTp[i], oldCl[o], oldTp[o]))
+           {
+            protects = true;
+            break;
+           }
+        }
+      if(!protects)
+         continue;
+      double d = 0.0;
+      if(wantBuy)
+         d = bid - oldCl[o];
+      else
+         d = oldCl[o] - bid;
+      if(d < 0.0)
+         d = 0.0;
+      nProt++;
+      ArrayResize(pCl, nProt);
+      ArrayResize(pDist, nProt);
+      pCl[nProt - 1]   = oldCl[o];
+      pDist[nProt - 1] = d;
+     }
+
+   const int cap = MaxGroupsPerSide();
+   const int nMerge = nF + nProt;
+   bool takeNew[];
+   int  takePi[];
+   double takeDist[];
+   ArrayResize(takeNew, nMerge);
+   ArrayResize(takePi, nMerge);
+   ArrayResize(takeDist, nMerge);
+   for(int i = 0; i < nF; i++)
+     {
+      takeNew[i]  = true;
+      takePi[i]   = i;
+      takeDist[i] = fDist[i];
+     }
+   for(int i = 0; i < nProt; i++)
+     {
+      const int k = nF + i;
+      takeNew[k]  = false;
+      takePi[k]   = i;
+      takeDist[k] = pDist[i];
+     }
+   for(int i = 1; i < nMerge; i++)
+     {
+      for(int j = i; j > 0; j--)
+        {
+         if(takeDist[j] >= takeDist[j - 1])
+            break;
+         const bool   tn = takeNew[j];
+         const int    tp = takePi[j];
+         const double td = takeDist[j];
+         takeNew[j]      = takeNew[j - 1];
+         takePi[j]       = takePi[j - 1];
+         takeDist[j]     = takeDist[j - 1];
+         takeNew[j - 1]  = tn;
+         takePi[j - 1]   = tp;
+         takeDist[j - 1] = td;
+        }
+     }
+
+   nOut  = 0;
+   nKeep = 0;
+   ArrayResize(idx, 0);
+   ArrayResize(keepCl, 0);
+   const int takeN = (nMerge > cap ? cap : nMerge);
+   for(int i = 0; i < takeN; i++)
+     {
+      if(takeNew[i])
+        {
+         nOut++;
+         ArrayResize(idx, nOut);
+         idx[nOut - 1] = fIdx[takePi[i]];
+        }
+      else
+        {
+         nKeep++;
+         ArrayResize(keepCl, nKeep);
+         keepCl[nKeep - 1] = pCl[takePi[i]];
+        }
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -1038,6 +2008,15 @@ int LayerCount()
    if(n > 9)
       n = 9;
    return(n);
+  }
+
+//+------------------------------------------------------------------+
+double LayerLot(const int pos)
+  {
+   double lot = InpLot;
+   if(InpLotStepUp && LayerCount() > 1 && pos > 0)
+      lot = InpLot * (double)pos;
+   return(NormalizeLot(lot));
   }
 
 //+------------------------------------------------------------------+
@@ -1118,9 +2097,13 @@ void DrawBuyLevels(const double lantai, const double tp, const string kind, cons
 //+------------------------------------------------------------------+
 void DrawAtapLantai()
   {
-   ObjectsDeleteAll(0, PREFIX_ATAP);
-   ObjectsDeleteAll(0, PREFIX_LANTAI);
-   ObjectsDeleteAll(0, PREFIX_LV);
+   const bool draw = ChartVisualsOn();
+   if(draw)
+     {
+      ObjectsDeleteAll(0, PREFIX_ATAP);
+      ObjectsDeleteAll(0, PREFIX_LANTAI);
+      ObjectsDeleteAll(0, PREFIX_LV);
+     }
 
    const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(bid <= 0.0)
@@ -1167,43 +2150,46 @@ void DrawAtapLantai()
    const double maxW   = MathMax(InpMaxAreaWidth, 1) * PipSize();
    const bool paired   = (hasAtap && hasLantai && (atap - lantai) <= maxW && atap > lantai);
 
-   if(hasAtap)
+   if(draw)
      {
-      const SrZone z = g_zones[atapIdx];
-      const int rk = PivotRank(z.pivotTime, PIVOT_SELL);
-      CreateLevelLine(PREFIX_ATAP, z.high, InpResistColor,
-                      StringFormat("PAC Atap (Pivot Sell ke-%d)\n%s\nH=%s",
-                                   rk,
-                                   TimeToString(z.left, TIME_DATE | TIME_MINUTES),
-                                   DoubleToString(z.high, _Digits)));
-     }
-   if(hasLantai)
-     {
-      const SrZone z = g_zones[lantaiIdx];
-      const int rk = PivotRank(z.pivotTime, PIVOT_BUY);
-      CreateLevelLine(PREFIX_LANTAI, z.low, InpSupportColor,
-                      StringFormat("PAC Lantai (Pivot Buy ke-%d)\n%s\nL=%s",
-                                   rk,
-                                   TimeToString(z.left, TIME_DATE | TIME_MINUTES),
-                                   DoubleToString(z.low, _Digits)));
-     }
-
-   if(paired)
-     {
-      const double tp = (atap + lantai) * 0.5;
-      CreateLevelLine(PREFIX_LV + "TP", tp, clrGold,
-                      StringFormat("PAC TP (Paired)\n%s", DoubleToString(tp, _Digits)));
-      DrawSellLevels(atap, tp, "Paired", false);
-      DrawBuyLevels(lantai, tp, "Paired", false);
-     }
-   else
-     {
-      const double tpS = hasAtap   ? (atap - maxW * 0.5)   : 0.0;
-      const double tpB = hasLantai ? (lantai + maxW * 0.5) : 0.0;
       if(hasAtap)
-         DrawSellLevels(atap, tpS, "Mandiri", true);
+        {
+         const SrZone z = g_zones[atapIdx];
+         const int rk = PivotRank(z.pivotTime, PIVOT_SELL);
+         CreateLevelLine(PREFIX_ATAP, z.high, InpResistColor,
+                         StringFormat("PAC Atap (Pivot Sell ke-%d)\n%s\nH=%s",
+                                      rk,
+                                      TimeToString(z.left, TIME_DATE | TIME_MINUTES),
+                                      DoubleToString(z.high, _Digits)));
+        }
       if(hasLantai)
-         DrawBuyLevels(lantai, tpB, "Mandiri", true);
+        {
+         const SrZone z = g_zones[lantaiIdx];
+         const int rk = PivotRank(z.pivotTime, PIVOT_BUY);
+         CreateLevelLine(PREFIX_LANTAI, z.low, InpSupportColor,
+                         StringFormat("PAC Lantai (Pivot Buy ke-%d)\n%s\nL=%s",
+                                      rk,
+                                      TimeToString(z.left, TIME_DATE | TIME_MINUTES),
+                                      DoubleToString(z.low, _Digits)));
+        }
+
+      if(paired)
+        {
+         const double tp = (atap + lantai) * 0.5;
+         CreateLevelLine(PREFIX_LV + "TP", tp, clrGold,
+                         StringFormat("PAC TP (Paired)\n%s", DoubleToString(tp, _Digits)));
+         DrawSellLevels(atap, tp, "Paired", false);
+         DrawBuyLevels(lantai, tp, "Paired", false);
+        }
+      else
+        {
+         const double tpS = hasAtap   ? (atap - maxW * 0.5)   : 0.0;
+         const double tpB = hasLantai ? (lantai + maxW * 0.5) : 0.0;
+         if(hasAtap)
+            DrawSellLevels(atap, tpS, "Mandiri", true);
+         if(hasLantai)
+            DrawBuyLevels(lantai, tpB, "Mandiri", true);
+        }
      }
    MaybeSendEligible(atapIdx, lantaiIdx, paired, maxW);
   }
@@ -1431,6 +2417,24 @@ bool HasPacPosition(const bool isBuy, const double cl)
   }
 
 //+------------------------------------------------------------------+
+bool HasQueuedReentry(const bool isBuy, const double cl)
+  {
+   const int n = ArraySize(g_tpBatches);
+   for(int i = 0; i < n; i++)
+     {
+      for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
+        {
+         PacCmt p;
+         if(!ParsePacCommentEx(g_tpBatches[i].slots[s].comment, p))
+            continue;
+         if(p.isBuy == isBuy && SameCl(p.clPrice, cl))
+            return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
 void CancelStalePendings(const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -1458,16 +2462,118 @@ void CancelStalePendings(const double &liveCl[], const bool &liveBuy[], const in
         }
       if(current)
          continue;
-      if(HasPacPosition(buy, ccl))
-         continue;
-      if(FindBatchIndex(p.groupCode) >= 0)
-         continue;
-      const int gi = FindGroupIndex(p.groupCode);
-      if(gi >= 0 && g_groups[gi].reentryCount > 0)
-         continue;
       const string cmt = OrderGetString(ORDER_COMMENT);
       if(g_trade.OrderDelete(ticket) && TradeOk())
-         Print("PAC hapus pending stale: ", cmt);
+        {
+         Print("PAC geser: hapus pending grup jauh ", cmt);
+         DropTpBatchesForGroup(p.groupCode);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DropStaleTpBatches(const double &liveCl[], const bool &liveBuy[], const int nLive)
+  {
+   for(int i = ArraySize(g_tpBatches) - 1; i >= 0; i--)
+     {
+      const int gi = FindGroupIndex(g_tpBatches[i].groupCode);
+      bool live = false;
+      if(gi >= 0)
+        {
+         const bool buy = (g_groups[gi].direction > 0);
+         for(int k = 0; k < nLive; k++)
+           {
+            if(liveBuy[k] == buy && SameCl(liveCl[k], g_groups[gi].clPrice))
+              {
+               live = true;
+               break;
+              }
+           }
+        }
+      if(!live)
+         RemoveTpBatchAt(i);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
+                    int &buyIdx[], int &nBuy, int &sellIdx[], int &nSell)
+  {
+   nLive = 0;
+   ArrayResize(liveCl, 0);
+   ArrayResize(liveBuy, 0);
+   nBuy = 0;
+   nSell = 0;
+   ArrayResize(buyIdx, 0);
+   ArrayResize(sellIdx, 0);
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0.0)
+      return;
+   LiveItem items[];
+   CollectItems(items);
+   const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
+   const double pip  = PipSize();
+   double keepB[];
+   double keepS[];
+   int nkb = 0;
+   int nks = 0;
+   CollectNearestZones(true, bid, maxW, buyIdx, nBuy, keepB, nkb, items);
+   CollectNearestZones(false, bid, maxW, sellIdx, nSell, keepS, nks, items);
+   for(int i = 0; i < nBuy; i++)
+     {
+      const double cl = NormalizePrice(g_zones[buyIdx[i]].low - MathMax(InpCLBuffer, 0) * pip);
+      nLive++;
+      ArrayResize(liveCl, nLive);
+      ArrayResize(liveBuy, nLive);
+      liveCl[nLive - 1]  = cl;
+      liveBuy[nLive - 1] = true;
+     }
+   for(int i = 0; i < nkb; i++)
+     {
+      bool dup = false;
+      for(int k = 0; k < nLive; k++)
+        {
+         if(liveBuy[k] && SameCl(liveCl[k], keepB[i]))
+           {
+            dup = true;
+            break;
+           }
+        }
+      if(dup)
+         continue;
+      nLive++;
+      ArrayResize(liveCl, nLive);
+      ArrayResize(liveBuy, nLive);
+      liveCl[nLive - 1]  = keepB[i];
+      liveBuy[nLive - 1] = true;
+     }
+   for(int i = 0; i < nSell; i++)
+     {
+      const double cl = NormalizePrice(g_zones[sellIdx[i]].high + MathMax(InpCLBuffer, 0) * pip);
+      nLive++;
+      ArrayResize(liveCl, nLive);
+      ArrayResize(liveBuy, nLive);
+      liveCl[nLive - 1]  = cl;
+      liveBuy[nLive - 1] = false;
+     }
+   for(int i = 0; i < nks; i++)
+     {
+      bool dup = false;
+      for(int k = 0; k < nLive; k++)
+        {
+         if(!liveBuy[k] && SameCl(liveCl[k], keepS[i]))
+           {
+            dup = true;
+            break;
+           }
+        }
+      if(dup)
+         continue;
+      nLive++;
+      ArrayResize(liveCl, nLive);
+      ArrayResize(liveBuy, nLive);
+      liveCl[nLive - 1]  = keepS[i];
+      liveBuy[nLive - 1] = false;
      }
   }
 
@@ -1495,6 +2601,9 @@ bool TradeOk()
 bool PlacePending(const bool isBuy, const double lot, const double price,
                   const double sl, const double tp, const string comment)
   {
+   string newsName = "";
+   if(InNewsWindow(newsName))
+      return(false);
    const ENUM_ORDER_TYPE type = SelectPendingType(isBuy, price);
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
@@ -1524,7 +2633,9 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
    double entry1 = 0.0;
    CalcEntryClSl(isBuy, extreme, tp, entry1, cl, sl);
    const double tpN = NormalizePrice(tp);
-   const double lot = NormalizeLot(InpLot);
+   string dummy = "";
+   if(HasPacSide(isBuy, cl, dummy) || HasQueuedReentry(isBuy, cl))
+      return;
 
    for(int i = 1; i <= n; i++)
      {
@@ -1533,8 +2644,10 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
       double entry = entry1 + (extreme - entry1) * (double)(i - 1) / (double)n;
       entry = NormalizePrice(entry);
       const string cmt = MakeComment(paired, isBuy, n, i, cl, ts);
+      const double lot = LayerLot(i);
       if(PlacePending(isBuy, lot, entry, sl, tpN, cmt))
-         Print("PAC pending: ", cmt, " @ ", DoubleToString(entry, _Digits));
+         Print("PAC pending: ", cmt, " @ ", DoubleToString(entry, _Digits),
+               " lot ", DoubleToString(lot, 2));
      }
   }
 
@@ -1544,51 +2657,31 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
   {
    if(!InpSendOrders || InpLot <= 0.0)
       return;
+   string newsName = "";
+   if(InNewsWindow(newsName))
+      return;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       return;
 
-   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    const double pip = PipSize();
-   const int nz = ArraySize(g_zones);
 
+   int buyIdx[];
+   int sellIdx[];
+   int nBuy  = 0;
+   int nSell = 0;
    double liveCl[];
    bool   liveBuy[];
    int    nLive = 0;
-
-   for(int i = 0; i < nz; i++)
-     {
-      if(!ZoneOrderEligible(g_zones[i]))
-         continue;
-      double cl = 0.0;
-      bool isBuy = false;
-      if(g_zones[i].isSupport)
-        {
-         if(g_zones[i].low > bid)
-            continue;
-         isBuy = true;
-         cl    = NormalizePrice(g_zones[i].low - MathMax(InpCLBuffer, 0) * pip);
-        }
-      else
-        {
-         if(g_zones[i].high < bid)
-            continue;
-         isBuy = false;
-         cl    = NormalizePrice(g_zones[i].high + MathMax(InpCLBuffer, 0) * pip);
-        }
-      if(ClBrokenOnClosedBar(isBuy, cl, DetectionTF()))
-         continue;
-      nLive++;
-      ArrayResize(liveCl, nLive);
-      ArrayResize(liveBuy, nLive);
-      liveCl[nLive - 1]  = cl;
-      liveBuy[nLive - 1] = isBuy;
-     }
-
+   BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
    CancelStalePendings(liveCl, liveBuy, nLive);
+   DropStaleTpBatches(liveCl, liveBuy, nLive);
 
    datetime stamp = TimeCurrent();
+   const bool pairKeep = (paired && atapIdx >= 0 && lantaiIdx >= 0 &&
+                          IdxHas(sellIdx, nSell, atapIdx) &&
+                          IdxHas(buyIdx, nBuy, lantaiIdx));
 
-   if(paired && atapIdx >= 0 && lantaiIdx >= 0)
+   if(pairKeep)
      {
       const double clS = NormalizePrice(g_zones[atapIdx].high + MathMax(InpCLBuffer, 0) * pip);
       const double clB = NormalizePrice(g_zones[lantaiIdx].low - MathMax(InpCLBuffer, 0) * pip);
@@ -1613,44 +2706,33 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
          SendSide(true, true, g_zones[lantaiIdx].low, tp, ts);
      }
 
-   for(int i = 0; i < nz; i++)
+   for(int i = 0; i < nBuy; i++)
      {
-      if(!ZoneOrderEligible(g_zones[i]))
+      const int z = buyIdx[i];
+      if(pairKeep && z == lantaiIdx)
          continue;
-      if(paired && (i == atapIdx || i == lantaiIdx))
+      const double cl = NormalizePrice(g_zones[z].low - MathMax(InpCLBuffer, 0) * pip);
+      string ts = "";
+      if(!HasPacSide(true, cl, ts) || StringLen(ts) == 0)
+        {
+         ts = StampNow(stamp);
+         stamp++;
+        }
+      SendSide(true, false, g_zones[z].low, g_zones[z].low + maxW * 0.5, ts);
+     }
+   for(int i = 0; i < nSell; i++)
+     {
+      const int z = sellIdx[i];
+      if(pairKeep && z == atapIdx)
          continue;
-      if(g_zones[i].isSupport)
+      const double cl = NormalizePrice(g_zones[z].high + MathMax(InpCLBuffer, 0) * pip);
+      string ts = "";
+      if(!HasPacSide(false, cl, ts) || StringLen(ts) == 0)
         {
-         if(g_zones[i].low > bid)
-            continue;
-         const double cl = NormalizePrice(g_zones[i].low - MathMax(InpCLBuffer, 0) * pip);
-         if(ClBrokenOnClosedBar(true, cl, DetectionTF()))
-            continue;
-         string ts = "";
-         if(!HasPacSide(true, cl, ts) || StringLen(ts) == 0)
-           {
-            ts = StampNow(stamp);
-            stamp++;
-           }
-         const double tp = g_zones[i].low + maxW * 0.5;
-         SendSide(true, false, g_zones[i].low, tp, ts);
+         ts = StampNow(stamp);
+         stamp++;
         }
-      else
-        {
-         if(g_zones[i].high < bid)
-            continue;
-         const double cl = NormalizePrice(g_zones[i].high + MathMax(InpCLBuffer, 0) * pip);
-         if(ClBrokenOnClosedBar(false, cl, DetectionTF()))
-            continue;
-         string ts = "";
-         if(!HasPacSide(false, cl, ts) || StringLen(ts) == 0)
-           {
-            ts = StampNow(stamp);
-            stamp++;
-           }
-         const double tp = g_zones[i].high - maxW * 0.5;
-         SendSide(false, false, g_zones[i].high, tp, ts);
-        }
+      SendSide(false, false, g_zones[z].high, g_zones[z].high - maxW * 0.5, ts);
      }
   }
 
@@ -1735,6 +2817,33 @@ int FindGroupIndex(const string code)
          return(i);
      }
    return(-1);
+  }
+
+//+------------------------------------------------------------------+
+int FindZoneIndexForCl(const bool isBuy, const double cl)
+  {
+   const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport != isBuy)
+         continue;
+      double zcl = 0.0;
+      double ztp = 0.0;
+      ZoneClTp(g_zones[z], maxW, zcl, ztp);
+      if(SameCl(zcl, cl))
+         return(z);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+bool GroupPivotCapReached(const PacGroup &g)
+  {
+   const int z = FindZoneIndexForCl(g.direction > 0, g.clPrice);
+   if(z < 0)
+      return(false);
+   return(g_zones[z].pivotTouches >= MaxPivotTouches());
   }
 
 //+------------------------------------------------------------------+
@@ -2052,6 +3161,28 @@ void SyncGroups(const LiveItem &items[])
       next[nn] = g;
      }
 
+   for(int i = 0; i < ArraySize(g_groups); i++)
+     {
+      if(g_groups[i].clExecuted)
+         continue;
+      if(FindBatchIndex(g_groups[i].groupCode) < 0)
+         continue;
+      bool inNext = false;
+      for(int j = 0; j < ArraySize(next); j++)
+        {
+         if(next[j].groupCode == g_groups[i].groupCode)
+           {
+            inNext = true;
+            break;
+           }
+        }
+      if(inNext)
+         continue;
+      const int nn = ArraySize(next);
+      ArrayResize(next, nn + 1);
+      next[nn] = g_groups[i];
+     }
+
    ArrayResize(g_groups, ArraySize(next));
    for(int i = 0; i < ArraySize(next); i++)
       g_groups[i] = next[i];
@@ -2106,7 +3237,7 @@ void CheckAllClcc()
   }
 
 //+------------------------------------------------------------------+
-void DeletePendingInGroup(PacGroup &g)
+void DeletePendingInGroup(PacGroup &g, const string tag)
   {
    LiveItem items[];
    CollectItems(items);
@@ -2116,17 +3247,19 @@ void DeletePendingInGroup(PacGroup &g)
       if(items[i].isPosition || !ItemMatchesGroup(items[i], g))
          continue;
       if(!g_trade.OrderDelete(items[i].ticket) || !TradeOk())
-         Print("PAC MaxReentry gagal hapus #", items[i].ticket);
+         Print("PAC ", tag, " gagal hapus #", items[i].ticket);
       else
         {
          deleted++;
-         Print("PAC MaxReentry hapus pending ", items[i].comment);
+         Print("PAC ", tag, " hapus pending ", items[i].comment);
         }
      }
-   const string msg = "PAC Max Reentry " + _Symbol + " " + g.groupCode +
+   if(deleted <= 0)
+      return;
+   const string msg = "PAC " + tag + " " + _Symbol + " " + g.groupCode +
                       " (" + IntegerToString(deleted) + " pending dihapus)";
    Print(msg);
-   if(InpAlertOnReentry)
+   if(tag == "MaxReentry" && InpAlertOnReentry)
       Alert(msg);
   }
 
@@ -2172,6 +3305,9 @@ void RemoveTpBatchAt(const int index)
 //+------------------------------------------------------------------+
 bool PlaceReentry(const TpSlot &slot)
   {
+   PacCmt p;
+   if(ParsePacCommentEx(slot.comment, p) && HasPacLayer(p.isBuy, p.clPrice, p.position))
+      return(true);
    const double entry = NormalizePrice(slot.entry);
    const double lot   = NormalizeLot(slot.lot);
    if(PlacePending(slot.isBuy, lot, entry, slot.sl, slot.tp, slot.comment))
@@ -2201,12 +3337,24 @@ void ProcessTpBatches()
          continue;
         }
 
-      if(g_groups[gi].reentryCount >= InpMaxReentry)
+      if(GroupPivotCapReached(g_groups[gi]))
         {
-         DeletePendingInGroup(g_groups[gi]);
+         Print("PAC pivot cap ", code, " — tidak reentry");
+         DeletePendingInGroup(g_groups[gi], "pivot cap");
          RemoveTpBatchAt(i);
          continue;
         }
+
+      if(g_groups[gi].reentryCount >= MathMax(InpMaxReentry, 0))
+        {
+         DeletePendingInGroup(g_groups[gi], "MaxReentry");
+         RemoveTpBatchAt(i);
+         continue;
+        }
+
+      string newsName = "";
+      if(InNewsWindow(newsName))
+         continue;
 
       int okCount = 0;
       for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
@@ -2230,11 +3378,25 @@ void ProcessTpBatches()
   }
 
 //+------------------------------------------------------------------+
-void ManageOrders()
+void ApplyNewsFilter()
   {
-   if(g_inRefresh)
-      return;
-   g_inRefresh = true;
+   string newsName = "";
+   if(InNewsWindow(newsName))
+     {
+      if(newsName != g_lastNewsName)
+        {
+         Print("PAC news filter: ", newsName, " — tutup posisi & hapus pending");
+         g_lastNewsName = newsName;
+        }
+      FlattenNewsExposure();
+     }
+   else
+      g_lastNewsName = "";
+  }
+
+//+------------------------------------------------------------------+
+void RefreshGroupsAndClcc()
+  {
    LiveItem items[];
    CollectItems(items);
    UpdateSnapshots(items);
@@ -2245,6 +3407,59 @@ void ManageOrders()
       if(g_groups[i].clExecuted)
          FlattenGroup(g_groups[i]);
      }
+  }
+
+//+------------------------------------------------------------------+
+void ApplyPivotCapAndSlots()
+  {
+   LiveItem items[];
+   CollectItems(items);
+   UpdateSnapshots(items);
+   SyncGroups(items);
+
+   for(int i = 0; i < ArraySize(g_groups); i++)
+     {
+      if(g_groups[i].clExecuted)
+         continue;
+      if(!GroupPivotCapReached(g_groups[i]))
+         continue;
+      Print("PAC pivot cap ", g_groups[i].groupCode, " — hapus pending, tidak reentry");
+      DeletePendingInGroup(g_groups[i], "pivot cap");
+      DropTpBatchesForGroup(g_groups[i].groupCode);
+     }
+
+   double liveCl[];
+   bool   liveBuy[];
+   int    nLive = 0;
+   int    buyIdx[];
+   int    sellIdx[];
+   int    nBuy = 0;
+   int    nSell = 0;
+   BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
+   CancelStalePendings(liveCl, liveBuy, nLive);
+   DropStaleTpBatches(liveCl, liveBuy, nLive);
+  }
+
+//+------------------------------------------------------------------+
+void ManageFast()
+  {
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   ApplyNewsFilter();
+   ProcessTpBatches();
+   g_inRefresh = false;
+  }
+
+//+------------------------------------------------------------------+
+void ManageOrders()
+  {
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   ApplyNewsFilter();
+   RefreshGroupsAndClcc();
+   ApplyPivotCapAndSlots();
    ProcessTpBatches();
    g_inRefresh = false;
   }
