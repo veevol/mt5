@@ -71,25 +71,28 @@ input color             InpSupportColor = clrForestGreen; // RBR - Warna Zona
 input color             InpResistColor  = clrFireBrick;   // DBD - Warna Zona
 
 input group "=== Area ==="
-input int InpMaxAreaWidth = 300; // Jarak max Atap-Lantai (pips)
-input int InpCLBuffer     = 10;  // Buffer CL (pips)
-input int InpSLRatio      = 100; // Rasio SL-CL vs CL-TP (%)
+input int InpMaxAreaWidth = 600; // Jarak max Atap-Lantai (pips)
+input int InpCLBuffer     = 80;  // Buffer CL (pips)
+input int InpSLRatio      = 300; // Rasio SL-CL vs CL-TP (%)
 input int InpLayerCount   = 3;   // Jumlah layer
 
 input group "=== Order ==="
 input bool   InpSendOrders        = true; // Kirim pending otomatis
 input double InpLot               = 0.01; // Lot dasar (layer 1 / jauh dari CL)
 input bool   InpLotStepUp         = true; // Lot bertingkat jika layer > 1 (terbesar dekat CL)
-input int    InpMaxGroupsPerSide  = 2;    // Maks grup per arah (Buy/Sell)
-input int    InpMaxPivotTouches   = 3;    // Maks sentuhan pivot (termasuk yg mengaktifkan)
+input int    InpMaxGroupsPerSide  = 1;    // Maks grup per arah (Buy/Sell)
+input int    InpMaxPivotTouches   = 2;    // Maks sentuhan pivot (termasuk yg mengaktifkan)
 input bool   InpAlertOnCL       = false; // Alert saat CLCC
 input bool   InpAlertOnReentry  = false; // Alert saat reentry
 input int    InpMaxReentry      = 3;     // Maks reentry per grup setelah TP
 
 input group "=== News ==="
 input bool InpNewsFilter     = true; // Filter berita USD high-impact Investing (hardcode Jan-Agu 2026)
-input int  InpNewsMinsBefore = 30;   // Menit sebelum rilis
+input int  InpNewsMinsBefore = 60;   // Menit sebelum rilis
 input int  InpNewsMinsAfter  = 60;   // Menit sesudah rilis
+
+input group "=== Filter Jam ==="
+input bool InpHourFilter = true; // Filter jam rawan rugi (WIB, hasil analisis backtest multi-run)
 
 //+------------------------------------------------------------------+
 //| CONST                                                            |
@@ -238,6 +241,7 @@ string           g_clccGroup = "";
 double           g_clccCl[];
 bool             g_clccBuy[];
 string           g_lastNewsName = "";
+string           g_lastHourFilterLabel = "";
 datetime         g_newsUtc[];
 string           g_newsName[];
 datetime         g_newsCacheFrom  = 0;
@@ -679,6 +683,74 @@ datetime UtcToHfmChart(const datetime utc)
   }
 
 //+------------------------------------------------------------------+
+//| Tebak offset HFM (2/3) dari waktu SERVER (kebalikan dari fungsi   |
+//| di atas yang mulai dari UTC). Cuma ada 2 kandidat offset.         |
+//+------------------------------------------------------------------+
+int HfmOffsetHoursFromServer(const datetime serverTime)
+  {
+   if(HfmOffsetHours(serverTime - 2 * 3600) == 2)
+      return(2);
+   if(HfmOffsetHours(serverTime - 3 * 3600) == 3)
+      return(3);
+   return(2);
+  }
+
+//+------------------------------------------------------------------+
+datetime ServerToUtc(const datetime serverTime)
+  {
+   if(serverTime <= 0)
+      return(0);
+   return(serverTime - (datetime)HfmOffsetHoursFromServer(serverTime) * 3600);
+  }
+
+//+------------------------------------------------------------------+
+//| Jendela jam rawan rugi (WIB, UTC+7 tetap tanpa DST). Hasil        |
+//| pemetaan jam-open per 15 menit dari 4 run backtest terverifikasi  |
+//| (Jan-Jul 2026, XAUUSD M5) — lihat catatan analisis untuk detail.  |
+//+------------------------------------------------------------------+
+struct HourFilterWindow
+  {
+   int    startMin; // menit sejak 00:00 WIB
+   int    endMin;   // inklusif
+   string label;
+  };
+
+HourFilterWindow g_hourWindows[] =
+  {
+   { 5 * 60 + 15,  5 * 60 + 59, "05:15-05:59 WIB" },
+   { 8 * 60 +  0,  8 * 60 + 44, "08:00-08:44 WIB" },
+   {18 * 60 +  0, 18 * 60 + 14, "18:00-18:14 WIB" },
+   {21 * 60 +  0, 21 * 60 + 14, "21:00-21:14 WIB" },
+   {21 * 60 + 30, 21 * 60 + 44, "21:30-21:44 WIB" },
+  };
+
+//+------------------------------------------------------------------+
+bool InHourFilterWindow(string &labelOut)
+  {
+   labelOut = "";
+   if(!InpHourFilter)
+      return(false);
+   const datetime now = TimeCurrent();
+   if(now <= 0)
+      return(false);
+   const datetime utc = ServerToUtc(now);
+   const datetime wib = utc + 7 * 3600;
+   MqlDateTime dt;
+   TimeToStruct(wib, dt);
+   const int mins = dt.hour * 60 + dt.min;
+   const int n = ArraySize(g_hourWindows);
+   for(int i = 0; i < n; i++)
+     {
+      if(mins >= g_hourWindows[i].startMin && mins <= g_hourWindows[i].endMin)
+        {
+         labelOut = g_hourWindows[i].label;
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
 bool InNewsWindow(string &nameOut)
   {
    nameOut = "";
@@ -873,6 +945,13 @@ int OnInit()
             InpNewsMinsBefore, " mnt sebelum / ", InpNewsMinsAfter,
             " mnt sesudah rilis. Hardcode Investing high-impact USD ",
             IntegerToString(NewsCount()), " event, 1 Jan-31 Agu 2026. Filter & garis chart jam HFM.");
+   if(InpHourFilter)
+     {
+      string hourList = "";
+      for(int hw = 0; hw < ArraySize(g_hourWindows); hw++)
+         hourList += (hw > 0 ? ", " : "") + g_hourWindows[hw].label;
+      Print("PAC hour filter ON. Tutup posisi + hapus pending saat jendela jam rawan rugi (WIB): ", hourList);
+     }
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
@@ -918,6 +997,7 @@ void OnTick()
       return;
    g_inRefresh = true;
    ApplyNewsFilter();
+   ApplyHourFilter();
    if(newBar)
       RefreshGroupsAndClcc();
    g_inRefresh = false;
@@ -2604,6 +2684,9 @@ bool PlacePending(const bool isBuy, const double lot, const double price,
    string newsName = "";
    if(InNewsWindow(newsName))
       return(false);
+   string hourLabel = "";
+   if(InHourFilterWindow(hourLabel))
+      return(false);
    const ENUM_ORDER_TYPE type = SelectPendingType(isBuy, price);
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
@@ -2659,6 +2742,9 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       return;
    string newsName = "";
    if(InNewsWindow(newsName))
+      return;
+   string hourLabel = "";
+   if(InHourFilterWindow(hourLabel))
       return;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       return;
@@ -3355,6 +3441,9 @@ void ProcessTpBatches()
       string newsName = "";
       if(InNewsWindow(newsName))
          continue;
+      string hourLabel = "";
+      if(InHourFilterWindow(hourLabel))
+         continue;
 
       int okCount = 0;
       for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
@@ -3392,6 +3481,27 @@ void ApplyNewsFilter()
      }
    else
       g_lastNewsName = "";
+  }
+
+//+------------------------------------------------------------------+
+//| Sama seperti ApplyNewsFilter — pakai ulang FlattenNewsExposure()  |
+//| karena isinya generik (tutup semua posisi/pending simbol+magic    |
+//| ini), bukan spesifik ke berita.                                   |
+//+------------------------------------------------------------------+
+void ApplyHourFilter()
+  {
+   string hourLabel = "";
+   if(InHourFilterWindow(hourLabel))
+     {
+      if(hourLabel != g_lastHourFilterLabel)
+        {
+         Print("PAC hour filter: ", hourLabel, " — tutup posisi & hapus pending");
+         g_lastHourFilterLabel = hourLabel;
+        }
+      FlattenNewsExposure();
+     }
+   else
+      g_lastHourFilterLabel = "";
   }
 
 //+------------------------------------------------------------------+
@@ -3447,6 +3557,7 @@ void ManageFast()
       return;
    g_inRefresh = true;
    ApplyNewsFilter();
+   ApplyHourFilter();
    ProcessTpBatches();
    g_inRefresh = false;
   }
@@ -3458,6 +3569,7 @@ void ManageOrders()
       return;
    g_inRefresh = true;
    ApplyNewsFilter();
+   ApplyHourFilter();
    RefreshGroupsAndClcc();
    ApplyPivotCapAndSlots();
    ProcessTpBatches();
