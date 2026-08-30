@@ -102,6 +102,9 @@ input group "=== Filter Jam ==="
 input bool InpHourFilter = true; // Filter jam rawan rugi (WIB, hasil analisis backtest multi-run)
 input ENUM_HOUR_FILTER_MODE InpHourFilterMode = HOUR_FLATTEN_ALL; // Aksi saat jendela jam aktif
 
+input group "=== Filter Hari ==="
+input bool InpDisableThursday = true; // Matikan entry baru hari Kamis (WIB, hasil analisis backtest multi-run)
+
 input group "=== Tampilan Chart (Tester) ==="
 input bool InpChartLiteMode = false; // Mode ringan: sembunyikan zona kadaluarsa (kurangi jumlah objek chart)
 
@@ -729,11 +732,16 @@ struct HourFilterWindow
 
 HourFilterWindow g_hourWindows[] =
   {
-   { 5 * 60 + 15,  5 * 60 + 59, "05:15-05:59 WIB" },
+   { 1 * 60 +  0,  1 * 60 + 29, "01:00-01:29 WIB" },
+   { 5 * 60 +  0,  5 * 60 + 59, "05:00-05:59 WIB" },
+   { 7 * 60 + 30,  7 * 60 + 59, "07:30-07:59 WIB" },
    { 8 * 60 +  0,  8 * 60 + 44, "08:00-08:44 WIB" },
+   {12 * 60 +  0, 12 * 60 + 29, "12:00-12:29 WIB" },
    {18 * 60 +  0, 18 * 60 + 14, "18:00-18:14 WIB" },
    {21 * 60 +  0, 21 * 60 + 14, "21:00-21:14 WIB" },
-   {21 * 60 + 30, 21 * 60 + 44, "21:30-21:44 WIB" },
+   {21 * 60 + 30, 21 * 60 + 59, "21:30-21:59 WIB" },
+   {22 * 60 +  0, 22 * 60 + 59, "22:00-22:59 WIB" },
+   {23 * 60 +  0, 23 * 60 + 29, "23:00-23:29 WIB" },
   };
 
 //+------------------------------------------------------------------+
@@ -760,6 +768,24 @@ bool InHourFilterWindow(string &labelOut)
         }
      }
    return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Hari Kamis (WIB) rawan rugi konsisten di backtest multi-run --   |
+//| cuma blokir entry baru, posisi yang sudah ada dibiarkan jalan.   |
+//+------------------------------------------------------------------+
+bool IsDisabledDayWib()
+  {
+   if(!InpDisableThursday)
+      return(false);
+   const datetime now = TimeCurrent();
+   if(now <= 0)
+      return(false);
+   const datetime utc = ServerToUtc(now);
+   const datetime wib = utc + 7 * 3600;
+   MqlDateTime dt;
+   TimeToStruct(wib, dt);
+   return(dt.day_of_week == THURSDAY);
   }
 
 //+------------------------------------------------------------------+
@@ -1024,6 +1050,8 @@ int OnInit()
       if(InpHourFilterMode == HOUR_BLOCK_ENTRY_ONLY) modeText = "cuma blokir entry baru, semua yg sudah ada dibiarkan";
       Print("PAC hour filter ON (mode: ", modeText, "). Jendela jam rawan rugi (WIB): ", hourList);
      }
+   if(InpDisableThursday)
+      Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
@@ -2763,6 +2791,8 @@ bool PlacePending(const bool isBuy, const double lot, const double price,
    string hourLabel = "";
    if(InHourFilterWindow(hourLabel))
       return(false);
+   if(IsDisabledDayWib())
+      return(false);
    const ENUM_ORDER_TYPE type = SelectPendingType(isBuy, price);
    g_trade.SetExpertMagicNumber(InpMagic);
    g_trade.SetTypeFillingBySymbol(_Symbol);
@@ -2877,6 +2907,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       return;
    string hourLabel = "";
    if(InHourFilterWindow(hourLabel))
+      return;
+   if(IsDisabledDayWib())
       return;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       return;
@@ -3577,6 +3609,8 @@ void ProcessTpBatches()
          continue;
       string hourLabel = "";
       if(InHourFilterWindow(hourLabel))
+         continue;
+      if(IsDisabledDayWib())
          continue;
 
       int okCount = 0;
