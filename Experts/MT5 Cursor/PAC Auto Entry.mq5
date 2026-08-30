@@ -68,7 +68,7 @@ enum ENUM_DETECTION_TF
 //+------------------------------------------------------------------+
 input group "=== Deteksi ==="
 input ENUM_DETECTION_TF InpDetectionTF = TF_AUTO;         // TF Pivot & Base
-input int               InpLookback       = 500;             // Jml bar scan
+input int               InpLookback       = 600;             // Jml bar scan
 input int               InpMaxBaseCandles = 10;              // Maks candle Base per zona
 input ENUM_PIVOT_MARK   InpPivotSymbol = MARK_LOZENGE_SM; // Pivot - Style Tag
 input int               InpGapPips     = 5;               // Pivot - Offset Tag (pips)
@@ -79,7 +79,7 @@ input color             InpResistColor  = clrFireBrick;   // DBD - Warna Zona
 
 input group "=== Area ==="
 input int InpMaxAreaWidth = 600; // Jarak max Atap-Lantai (pips)
-input int InpCLBuffer     = 80;  // Buffer CL (pips)
+input int InpCLBuffer     = 90;  // Buffer CL (pips)
 input int InpSLRatio      = 300; // Rasio SL-CL vs CL-TP (%)
 input int InpLayerCount   = 3;   // Jumlah layer
 
@@ -87,15 +87,15 @@ input group "=== Order ==="
 input bool   InpSendOrders        = true; // Kirim pending otomatis
 input double InpLot               = 0.01; // Lot dasar (layer 1 / jauh dari CL)
 input bool   InpLotStepUp         = true; // Lot bertingkat jika layer > 1 (terbesar dekat CL)
-input int    InpMaxGroupsPerSide  = 1;    // Maks grup per arah (Buy/Sell)
-input int    InpMaxPivotTouches   = 2;    // Maks sentuhan pivot (termasuk yg mengaktifkan)
+input int    InpMaxGroupsPerSide  = 2;    // Maks grup per arah (Buy/Sell)
+input int    InpMaxPivotTouches   = 5;    // Maks sentuhan pivot (termasuk yg mengaktifkan)
 input bool   InpAlertOnCL       = false; // Alert saat CLCC
 input bool   InpAlertOnReentry  = false; // Alert saat reentry
 input int    InpMaxReentry      = 3;     // Maks reentry per grup setelah TP
 
 input group "=== News ==="
 input bool InpNewsFilter     = true; // Filter berita USD high-impact Investing (hardcode Jan-Agu 2026)
-input int  InpNewsMinsBefore = 60;   // Menit sebelum rilis
+input int  InpNewsMinsBefore = 30;   // Menit sebelum rilis
 input int  InpNewsMinsAfter  = 60;   // Menit sesudah rilis
 
 input group "=== Filter Jam ==="
@@ -106,7 +106,7 @@ input group "=== Filter Hari ==="
 input bool InpDisableThursday = true; // Matikan entry baru hari Kamis (WIB, hasil analisis backtest multi-run)
 
 input group "=== Tampilan Chart (Tester) ==="
-input bool InpChartLiteMode = false; // Mode ringan: sembunyikan zona kadaluarsa (kurangi jumlah objek chart)
+input bool InpChartLiteMode = true; // Mode ringan: sembunyikan zona kadaluarsa (kurangi jumlah objek chart)
 
 //+------------------------------------------------------------------+
 //| CONST                                                            |
