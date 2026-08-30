@@ -2808,6 +2808,62 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
   }
 
 //+------------------------------------------------------------------+
+//| Cari extreme (high/low) zona lawan terdekat dari daftar slot     |
+//| aktif+kandidat, buat cegah TP mandiri crossing kalau ternyata    |
+//| ada zona lawan yg jaraknya < maxW. Return 0 kalau tidak ada.     |
+//+------------------------------------------------------------------+
+double NearestOppositeExtreme(const bool isBuy, const double extreme,
+                              const double &liveCl[], const bool &liveBuy[], const int nLive)
+  {
+   const double buf = MathMax(InpCLBuffer, 0) * PipSize();
+   double best = 0.0;
+   double bestDist = DBL_MAX;
+   for(int i = 0; i < nLive; i++)
+     {
+      if(liveBuy[i] == isBuy)
+         continue;
+      const double oppExtreme = liveBuy[i] ? (liveCl[i] + buf) : (liveCl[i] - buf);
+      double dist = 0.0;
+      if(isBuy)
+        {
+         if(oppExtreme <= extreme)
+            continue;
+         dist = oppExtreme - extreme;
+        }
+      else
+        {
+         if(oppExtreme >= extreme)
+            continue;
+         dist = extreme - oppExtreme;
+        }
+      if(dist < bestDist)
+        {
+         bestDist = dist;
+         best = oppExtreme;
+        }
+     }
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+//| TP mandiri (extreme +/- maxW/2), tapi di-clamp ke titik tengah   |
+//| kalau ada zona lawan lebih dekat dari maxW supaya TP dua sisi    |
+//| tidak saling menyeberang (crossing).                             |
+//+------------------------------------------------------------------+
+double IndependentTp(const bool isBuy, const double extreme, const double maxW,
+                     const double &liveCl[], const bool &liveBuy[], const int nLive)
+  {
+   double tp = isBuy ? (extreme + maxW * 0.5) : (extreme - maxW * 0.5);
+   const double oppExtreme = NearestOppositeExtreme(isBuy, extreme, liveCl, liveBuy, nLive);
+   if(oppExtreme <= 0.0)
+      return(tp);
+   const double gap = isBuy ? (oppExtreme - extreme) : (extreme - oppExtreme);
+   if(gap < maxW)
+      tp = (extreme + oppExtreme) * 0.5;
+   return(tp);
+  }
+
+//+------------------------------------------------------------------+
 void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired,
                        const double maxW)
   {
@@ -2877,7 +2933,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
          ts = StampNow(stamp);
          stamp++;
         }
-      SendSide(true, false, g_zones[z].low, g_zones[z].low + maxW * 0.5, ts);
+      const double tp = IndependentTp(true, g_zones[z].low, maxW, liveCl, liveBuy, nLive);
+      SendSide(true, false, g_zones[z].low, tp, ts);
      }
    for(int i = 0; i < nSell; i++)
      {
@@ -2891,7 +2948,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
          ts = StampNow(stamp);
          stamp++;
         }
-      SendSide(false, false, g_zones[z].high, g_zones[z].high - maxW * 0.5, ts);
+      const double tp = IndependentTp(false, g_zones[z].high, maxW, liveCl, liveBuy, nLive);
+      SendSide(false, false, g_zones[z].high, tp, ts);
      }
   }
 
