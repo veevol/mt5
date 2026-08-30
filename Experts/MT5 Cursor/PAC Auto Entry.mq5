@@ -37,10 +37,10 @@ enum ENUM_HOUR_FILTER_MODE
    HOUR_BLOCK_ENTRY_ONLY = 2, // Cuma blokir entry baru, biarkan semua yg sudah ada
   };
 
-enum ENUM_CL_MODE
+enum ENUM_U_MODE
   {
-   CL_FIXED_PIPS   = 0, // Pip tetap (InpCLBuffer)
-   CL_PERCENT_AREA = 1, // % x jarak Extreme-Entry asumsi mandiri (gaya GSC Assistant)
+   U_FIXED_PIPS = 0, // Pip tetap
+   U_ATR        = 1, // ATR(periode) di TF pilihan
   };
 
 enum ENUM_DETECTION_TF
@@ -83,13 +83,15 @@ input color             InpBaseColor   = clrWhite;        // Base - Warna Candle
 input color             InpSupportColor = clrForestGreen; // RBR - Warna Zona
 input color             InpResistColor  = clrFireBrick;   // DBD - Warna Zona
 
-input group "=== Area ==="
-input int InpMaxAreaWidth = 600; // Jarak max Atap-Lantai (pips)
-input ENUM_CL_MODE InpCLMode = CL_FIXED_PIPS; // Mode hitung buffer CL
-input int InpCLBuffer     = 90;  // Buffer CL - pip tetap (mode CL_FIXED_PIPS)
-input int InpCLPercentArea = 30; // Buffer CL - % x jarak Extreme-Entry asumsi mandiri (mode CL_PERCENT_AREA, gaya GSC Assistant)
-input int InpSLRatio      = 300; // Rasio SL-CL vs CL-TP (%)
-input int InpLayerCount   = 3;   // Jumlah layer
+input group "=== Area (U = jarak Anchor-Entry) ==="
+input ENUM_U_MODE     InpUMode      = U_FIXED_PIPS;    // Sumber U
+input int              InpUPips      = 150;             // U - pip tetap (mode U_FIXED_PIPS)
+input int              InpUAtrPeriod = 14;              // U - periode ATR (mode U_ATR)
+input ENUM_TIMEFRAMES InpUAtrTF     = PERIOD_CURRENT;  // U - TF ATR (CURRENT = ikut TF deteksi)
+input int InpCLPercentArea = 30;  // Anchor->CL = % x U
+input int InpTPPercentArea = 200; // Anchor->TP = % x U
+input int InpSLPercentArea = 300; // Anchor->SL = % x U
+input int InpLayerCount    = 3;   // Jumlah layer
 
 input group "=== Order ==="
 input bool   InpSendOrders        = true; // Kirim pending otomatis
@@ -112,6 +114,9 @@ input ENUM_HOUR_FILTER_MODE InpHourFilterMode = HOUR_FLATTEN_ALL; // Aksi saat j
 
 input group "=== Filter Hari ==="
 input bool InpDisableThursday = true; // Matikan entry baru hari Kamis (WIB, hasil analisis backtest multi-run)
+
+input group "=== TP Adaptif ==="
+input bool InpTpAdaptive = false; // TP menyempit otomatis ke zona standby terdekat (searah), tidak pernah melebar
 
 input group "=== Tampilan Chart (Tester) ==="
 input bool InpChartLiteMode = true; // Mode ringan: sembunyikan zona kadaluarsa (kurangi jumlah objek chart)
@@ -231,12 +236,11 @@ struct Snapshot
 
 struct TpSlot
   {
-   string comment;
-   double entry;
-   double sl;
-   double tp;
-   double lot;
-   bool   isBuy;
+   bool            isBuy;
+   int             layerCount;
+   int             position;
+   double          clPrice;   // dipakai cari anchor via FindZoneIndexForCl saat reentry dikirim
+   string          stamp;
   };
 
 struct TpBatch
@@ -271,6 +275,7 @@ datetime         g_newsCacheFrom  = 0;
 datetime         g_newsCacheUntil = 0;
 bool             g_newsCacheIn    = false;
 string           g_newsCacheName  = "";
+int              g_atrHandle      = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES DetectionTF()
@@ -1036,6 +1041,14 @@ int OnInit()
    g_lastNewsName = "";
    InitNewsCalendar();
 
+   if(InpUMode == U_ATR)
+     {
+      const ENUM_TIMEFRAMES atrTf = (InpUAtrTF == PERIOD_CURRENT) ? DetectionTF() : InpUAtrTF;
+      g_atrHandle = iATR(_Symbol, atrTf, MathMax(InpUAtrPeriod, 1));
+      if(g_atrHandle == INVALID_HANDLE)
+         Print("PAC: gagal membuat handle ATR untuk mode U_ATR, fallback ke pip tetap.");
+     }
+
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       Print("PAC: akun bukan hedging — layer bisa tergabung.");
    if(InpNewsFilter)
@@ -1056,12 +1069,15 @@ int OnInit()
      }
    if(InpDisableThursday)
       Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
-   if(InpCLMode == CL_PERCENT_AREA)
-      Print("PAC CL mode: PERCENT_AREA (", InpCLPercentArea,
-            "% x jarak Extreme-Entry asumsi mandiri, gaya GSC Assistant). Buffer saat ini: ",
-            DoubleToString(ClBufferPrice() / PipSize(), 1), " pip.");
-   else
-      Print("PAC CL mode: FIXED_PIPS (", InpCLBuffer, " pip tetap).");
+   if(InpTpAdaptive)
+      Print("PAC TP adaptif ON: TP bisa menyempit ke zona standby terdekat, tidak pernah melebar.");
+   {
+      const double u0 = ComputeU();
+      const string uSrc = (InpUMode == U_ATR) ? StringFormat("ATR(%d)", InpUAtrPeriod) : "pip tetap";
+      Print("PAC U (Anchor->Entry) sumber: ", uSrc, ", saat ini = ",
+            DoubleToString(u0 / PipSize(), 1), " pip. Anchor->CL=", InpCLPercentArea,
+            "% Anchor->TP=", InpTPPercentArea, "% Anchor->SL=", InpSLPercentArea, "% dari U.");
+   }
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
@@ -1081,6 +1097,11 @@ void OnDeinit(const int reason)
    DeleteMarks();
    DeleteNewsMarks();
    DeleteHourMarks();
+   if(g_atrHandle != INVALID_HANDLE)
+     {
+      IndicatorRelease(g_atrHandle);
+      g_atrHandle = INVALID_HANDLE;
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -1143,6 +1164,7 @@ void ScanAndDraw()
    MarkWeakness();
    MarkControls();
    ApplyClccToZones();
+   ApplyTpAdaptive();
    DrawPivots();
    DrawBases();
    DrawSrZones();
@@ -1204,21 +1226,36 @@ double PipSize()
   }
 
 //+------------------------------------------------------------------+
-//| Buffer CL dalam harga. Mode CL_PERCENT_AREA pakai jarak Extreme- |
-//| Entry versi mandiri (seperempat InpMaxAreaWidth) sebagai basis,  |
-//| dipakai seragam di semua tempat (termasuk zona yang akhirnya di- |
-//| pair) supaya tracking CL/eligibility antar fungsi tetap          |
-//| konsisten -- gaya GSC Assistant: CL = n% x jarak Extreme-Entry.  |
+//| U = jarak Anchor->Entry, dihitung fresh tiap dipanggil. "Terkunci"|
+//| secara alami begitu suatu pending benar-benar dikirim, karena     |
+//| entry/CL/SL/TP hasil hitungan saat itu langsung dibakar ke field  |
+//| order (harga, SL, TP) & comment (clPrice) -- tidak ada kode yang  |
+//| menghitung ulang nilai itu utk order yang sudah ada. Reentry yang |
+//| mengirim pending BARU otomatis dapat U baru krn manggil ini lagi. |
 //+------------------------------------------------------------------+
-double ClBufferPrice()
+double ComputeU()
   {
-   if(InpCLMode == CL_PERCENT_AREA)
+   if(InpUMode == U_ATR && g_atrHandle != INVALID_HANDLE)
      {
-      const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
-      const double areaQuarter = maxW * 0.25;
-      return(areaQuarter * MathMax(InpCLPercentArea, 0) / 100.0);
+      double buf[];
+      if(CopyBuffer(g_atrHandle, 0, 1, 1, buf) > 0 && buf[0] > 0.0)
+         return(buf[0]);
      }
-   return(MathMax(InpCLBuffer, 0) * PipSize());
+   return(MathMax(InpUPips, 1) * PipSize());
+  }
+
+//+------------------------------------------------------------------+
+double UClDist(const double u) { return(u * MathMax(InpCLPercentArea, 0) / 100.0); }
+double UTpDist(const double u) { return(u * MathMax(InpTPPercentArea, 0) / 100.0); }
+double USlDist(const double u) { return(u * MathMax(InpSLPercentArea, 0) / 100.0); }
+
+//+------------------------------------------------------------------+
+//| TP mandiri (Anchor +/- Anchor->TP), sebelum dicek silang dgn sisi |
+//| lawan -- lihat IndependentTp().                                  |
+//+------------------------------------------------------------------+
+double MandiriTp(const bool isBuy, const double extreme, const double u)
+  {
+   return(isBuy ? extreme + UTpDist(u) : extreme - UTpDist(u));
   }
 
 //+------------------------------------------------------------------+
@@ -1856,7 +1893,7 @@ void RememberClcc(const PacGroup &g)
 //+------------------------------------------------------------------+
 void ApplyClccToZones()
   {
-   const double buf = ClBufferPrice();
+   const double buf = UClDist(ComputeU());
    const int n = ArraySize(g_zones);
    for(int i = 0; i < n; i++)
      {
@@ -1877,11 +1914,128 @@ bool ZoneOrderEligible(const SrZone &z)
    if(z.pivotTouches >= MaxPivotTouches())
       return(false);
    const bool isBuy = z.isSupport;
-   const double buf = ClBufferPrice();
+   const double buf = UClDist(ComputeU());
    const double cl = isBuy
                      ? NormalizePrice(z.low - buf)
                      : NormalizePrice(z.high + buf);
    return(!WasClcc(isBuy, cl));
+  }
+
+//+------------------------------------------------------------------+
+//| Cari zona standby (belum isControl, bukan isWeak/expired) yang    |
+//| beririsan di antara Entry dan TP (current, bisa sudah pernah      |
+//| menyempit sebelumnya) suatu posisi/pending. Ambil yang PALING     |
+//| DEKAT ke Entry -- itu yang jadi TP baru. Return 0 kalau tidak ada |
+//| kandidat (TP tidak berubah). Fungsi ini murni satu arah: kandidat |
+//| yang diterima selalu lebih dekat ke Entry daripada curTp, jadi TP |
+//| otomatis tidak pernah melebar lagi walau dipanggil berulang.      |
+//+------------------------------------------------------------------+
+double TightestStandbyTp(const bool isBuy, const double entry, const double curTp)
+  {
+   if(entry <= 0.0 || curTp <= 0.0)
+      return(0.0);
+   double best = 0.0;
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+     {
+      const SrZone z = g_zones[i];
+      if(z.isControl || z.isWeak)
+         continue; // cuma zona standby, expired diabaikan
+      if(isBuy)
+        {
+         const double edge = z.low; // sisi zona yg duluan ketemu harga saat naik dari Entry
+         if(edge <= entry || edge >= curTp)
+            continue;
+         if(best <= 0.0 || edge < best)
+            best = edge;
+        }
+      else
+        {
+         const double edge = z.high; // sisi zona yg duluan ketemu harga saat turun dari Entry
+         if(edge >= entry || edge <= curTp)
+            continue;
+         if(best <= 0.0 || edge > best)
+            best = edge;
+        }
+     }
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+void ModifyItemTp(const LiveItem &it, const double newTp)
+  {
+   const double tpN = NormalizePrice(newTp);
+   if(it.isPosition)
+     {
+      if(!g_trade.PositionModify(it.ticket, it.sl, tpN) || !TradeOk())
+         Print("PAC TP adaptif: gagal modif posisi #", it.ticket);
+     }
+   else
+     {
+      if(!g_trade.OrderModify(it.ticket, it.price, it.sl, tpN, ORDER_TIME_GTC, 0) || !TradeOk())
+         Print("PAC TP adaptif: gagal modif pending #", it.ticket);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Tarik TP tiap grup live yang punya zona standby menghalangi di    |
+//| antara Entry (posisi/pending layer 1) dan TP saat ini. Satu arah  |
+//| (menyempit saja) & berlaku juga utk grup Paired -- lihat catatan  |
+//| TightestStandbyTp soal kenapa ini otomatis tidak pernah melebar.  |
+//+------------------------------------------------------------------+
+void ApplyTpAdaptive()
+  {
+   if(!InpTpAdaptive)
+      return;
+   LiveItem items[];
+   CollectItems(items);
+
+   string codes[];
+   double entries[];
+   bool   isBuys[];
+   double curTps[];
+   int    nGroup = 0;
+   for(int i = 0; i < ArraySize(items); i++)
+     {
+      if(!items[i].parsed || items[i].pac.position != 1)
+         continue;
+      int gi = -1;
+      for(int k = 0; k < nGroup; k++)
+        {
+         if(codes[k] == items[i].pac.groupCode)
+           {
+            gi = k;
+            break;
+           }
+        }
+      if(gi < 0)
+        {
+         nGroup++;
+         ArrayResize(codes, nGroup);
+         ArrayResize(entries, nGroup);
+         ArrayResize(isBuys, nGroup);
+         ArrayResize(curTps, nGroup);
+         gi = nGroup - 1;
+         codes[gi] = items[i].pac.groupCode;
+        }
+      entries[gi] = items[i].price;
+      isBuys[gi]  = items[i].pac.isBuy;
+      curTps[gi]  = items[i].tp;
+     }
+
+   for(int g = 0; g < nGroup; g++)
+     {
+      const double newTp = TightestStandbyTp(isBuys[g], entries[g], curTps[g]);
+      if(newTp <= 0.0)
+         continue;
+      for(int i = 0; i < ArraySize(items); i++)
+        {
+         if(!items[i].parsed || items[i].pac.groupCode != codes[g])
+            continue;
+         ModifyItemTp(items[i], newTp);
+        }
+      Print("PAC TP adaptif: ", codes[g], " TP ditarik ke ", DoubleToString(newTp, _Digits));
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -1903,18 +2057,18 @@ int MaxPivotTouches()
   }
 
 //+------------------------------------------------------------------+
-void ZoneClTp(const SrZone &z, const double maxW, double &cl, double &tp)
+void ZoneClTp(const SrZone &z, const double u, double &cl, double &tp)
   {
-   const double buf = ClBufferPrice();
+   const double buf = UClDist(u);
    if(z.isSupport)
      {
       cl = NormalizePrice(z.low - buf);
-      tp = NormalizePrice(z.low + maxW * 0.5);
+      tp = NormalizePrice(z.low + UTpDist(u));
      }
    else
      {
       cl = NormalizePrice(z.high + buf);
-      tp = NormalizePrice(z.high - maxW * 0.5);
+      tp = NormalizePrice(z.high - UTpDist(u));
      }
   }
 
@@ -1981,7 +2135,7 @@ bool IdxHas(const int &idx[], const int n, const int v)
   }
 
 //+------------------------------------------------------------------+
-void CollectNearestZones(const bool wantBuy, const double bid, const double maxW,
+void CollectNearestZones(const bool wantBuy, const double bid, const double u,
                          int &idx[], int &nOut, double &keepCl[], int &nKeep,
                          const LiveItem &items[])
   {
@@ -2004,7 +2158,7 @@ void CollectNearestZones(const bool wantBuy, const double bid, const double maxW
       double d = 0.0;
       double cl = 0.0;
       double tp = 0.0;
-      ZoneClTp(g_zones[z], maxW, cl, tp);
+      ZoneClTp(g_zones[z], u, cl, tp);
       if(wantBuy)
         {
          if(!g_zones[z].isSupport || g_zones[z].low > bid)
@@ -2232,34 +2386,34 @@ double LayerLot(const int pos)
   }
 
 //+------------------------------------------------------------------+
-void CalcEntryClSl(const bool isBuy, const double extreme, const double tp,
+void CalcEntryClSl(const bool isBuy, const double extreme, const double u,
                    double &entry1, double &cl, double &sl)
   {
-   const double clBuf = ClBufferPrice();
-   const double ratio = MathMax(InpSLRatio, 0) / 100.0;
+   const double clBuf = UClDist(u);
+   const double slBuf = USlDist(u);
    if(isBuy)
      {
-      entry1 = extreme + 0.5 * (tp - extreme);
+      entry1 = extreme + u;
       cl     = extreme - clBuf;
-      sl     = cl - ratio * MathAbs(tp - cl);
+      sl     = extreme - slBuf;
      }
    else
      {
-      entry1 = extreme - 0.5 * (extreme - tp);
+      entry1 = extreme - u;
       cl     = extreme + clBuf;
-      sl     = cl + ratio * MathAbs(cl - tp);
+      sl     = extreme + slBuf;
      }
    cl = NormalizePrice(cl);
    sl = NormalizePrice(sl);
   }
 
 //+------------------------------------------------------------------+
-void DrawSellLevels(const double atap, const double tp, const string kind, const bool drawTp)
+void DrawSellLevels(const double atap, const double tp, const double u, const string kind, const bool drawTp)
   {
    double entry1 = 0.0;
    double cl     = 0.0;
    double sl     = 0.0;
-   CalcEntryClSl(false, atap, tp, entry1, cl, sl);
+   CalcEntryClSl(false, atap, u, entry1, cl, sl);
    const int n = LayerCount();
 
    if(drawTp)
@@ -2280,12 +2434,12 @@ void DrawSellLevels(const double atap, const double tp, const string kind, const
   }
 
 //+------------------------------------------------------------------+
-void DrawBuyLevels(const double lantai, const double tp, const string kind, const bool drawTp)
+void DrawBuyLevels(const double lantai, const double tp, const double u, const string kind, const bool drawTp)
   {
    double entry1 = 0.0;
    double cl     = 0.0;
    double sl     = 0.0;
-   CalcEntryClSl(true, lantai, tp, entry1, cl, sl);
+   CalcEntryClSl(true, lantai, u, entry1, cl, sl);
    const int n = LayerCount();
 
    if(drawTp)
@@ -2358,8 +2512,9 @@ void DrawAtapLantai()
    const bool hasLantai = (lantaiIdx >= 0);
    const double atap   = hasAtap   ? g_zones[atapIdx].high : 0.0;
    const double lantai = hasLantai ? g_zones[lantaiIdx].low : 0.0;
-   const double maxW   = MathMax(InpMaxAreaWidth, 1) * PipSize();
-   const bool paired   = (hasAtap && hasLantai && (atap - lantai) <= maxW && atap > lantai);
+   const double u          = ComputeU();
+   const double crossThresh = 2.0 * UTpDist(u);
+   const bool paired   = (hasAtap && hasLantai && (atap - lantai) <= crossThresh && atap > lantai);
 
    if(draw)
      {
@@ -2389,20 +2544,20 @@ void DrawAtapLantai()
          const double tp = (atap + lantai) * 0.5;
          CreateLevelLine(PREFIX_LV + "TP", tp, clrGold,
                          StringFormat("PAC TP (Paired)\n%s", DoubleToString(tp, _Digits)));
-         DrawSellLevels(atap, tp, "Paired", false);
-         DrawBuyLevels(lantai, tp, "Paired", false);
+         DrawSellLevels(atap, tp, u, "Paired", false);
+         DrawBuyLevels(lantai, tp, u, "Paired", false);
         }
       else
         {
-         const double tpS = hasAtap   ? (atap - maxW * 0.5)   : 0.0;
-         const double tpB = hasLantai ? (lantai + maxW * 0.5) : 0.0;
+         const double tpS = hasAtap   ? MandiriTp(false, atap, u)   : 0.0;
+         const double tpB = hasLantai ? MandiriTp(true, lantai, u)  : 0.0;
          if(hasAtap)
-            DrawSellLevels(atap, tpS, "Mandiri", true);
+            DrawSellLevels(atap, tpS, u, "Mandiri", true);
          if(hasLantai)
-            DrawBuyLevels(lantai, tpB, "Mandiri", true);
+            DrawBuyLevels(lantai, tpB, u, "Mandiri", true);
         }
      }
-   MaybeSendEligible(atapIdx, lantaiIdx, paired, maxW);
+   MaybeSendEligible(atapIdx, lantaiIdx, paired, u);
   }
 
 //+------------------------------------------------------------------+
@@ -2520,7 +2675,10 @@ bool ParsePacCommentEx(const string cmt, PacCmt &out)
    out.clPrice    = cl;
    out.tfText     = parts[1];
    out.stamp      = parts[3];
-   out.groupCode  = StringSubstr(parts[0], 0, 2) + "-" + parts[3];
+   // groupCode sengaja cuma pakai arah (B/S) + stamp, TANPA status paired (P/M) --
+   // reentry menghitung ulang paired/mandiri fresh (bisa beda dari kirim awal),
+   // jadi identitas grup tidak boleh ikut goyah kalau status itu berubah.
+   out.groupCode  = StringSubstr(parts[0], 1, 1) + "-" + parts[3];
    return(true);
   }
 
@@ -2722,14 +2880,14 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
       return;
    LiveItem items[];
    CollectItems(items);
-   const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
-   const double buf  = ClBufferPrice();
+   const double u   = ComputeU();
+   const double buf = UClDist(u);
    double keepB[];
    double keepS[];
    int nkb = 0;
    int nks = 0;
-   CollectNearestZones(true, bid, maxW, buyIdx, nBuy, keepB, nkb, items);
-   CollectNearestZones(false, bid, maxW, sellIdx, nSell, keepS, nks, items);
+   CollectNearestZones(true, bid, u, buyIdx, nBuy, keepB, nkb, items);
+   CollectNearestZones(false, bid, u, sellIdx, nSell, keepS, nks, items);
    for(int i = 0; i < nBuy; i++)
      {
       const double cl = NormalizePrice(g_zones[buyIdx[i]].low - buf);
@@ -2841,13 +2999,13 @@ bool PlacePending(const bool isBuy, const double lot, const double price,
 
 //+------------------------------------------------------------------+
 void SendSide(const bool isBuy, const bool paired, const double extreme, const double tp,
-              const string ts)
+              const double u, const string ts)
   {
    const int n = LayerCount();
    double cl = 0.0;
    double sl = 0.0;
    double entry1 = 0.0;
-   CalcEntryClSl(isBuy, extreme, tp, entry1, cl, sl);
+   CalcEntryClSl(isBuy, extreme, u, entry1, cl, sl);
    const double tpN = NormalizePrice(tp);
    string dummy = "";
    if(HasPacSide(isBuy, cl, dummy) || HasQueuedReentry(isBuy, cl))
@@ -2870,12 +3028,14 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
 //+------------------------------------------------------------------+
 //| Cari extreme (high/low) zona lawan terdekat dari daftar slot     |
 //| aktif+kandidat, buat cegah TP mandiri crossing kalau ternyata    |
-//| ada zona lawan yg jaraknya < maxW. Return 0 kalau tidak ada.     |
+//| ada zona lawan yg jaraknya lebih dekat dari 2x Anchor->TP. Return |
+//| 0 kalau tidak ada. buf pakai U saat ini (perkiraan, lihat catatan|
+//| di ComputeU soal kapan U "terkunci").                            |
 //+------------------------------------------------------------------+
-double NearestOppositeExtreme(const bool isBuy, const double extreme,
+double NearestOppositeExtreme(const bool isBuy, const double extreme, const double u,
                               const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
-   const double buf = ClBufferPrice();
+   const double buf = UClDist(u);
    double best = 0.0;
    double bestDist = DBL_MAX;
    for(int i = 0; i < nLive; i++)
@@ -2906,26 +3066,27 @@ double NearestOppositeExtreme(const bool isBuy, const double extreme,
   }
 
 //+------------------------------------------------------------------+
-//| TP mandiri (extreme +/- maxW/2), tapi di-clamp ke titik tengah   |
-//| kalau ada zona lawan lebih dekat dari maxW supaya TP dua sisi    |
-//| tidak saling menyeberang (crossing).                             |
+//| TP mandiri (Anchor +/- Anchor->TP), tapi di-clamp ke titik tengah|
+//| kalau ada zona lawan lebih dekat dari 2x Anchor->TP supaya TP dua|
+//| sisi tidak saling menyeberang (crossing).                        |
 //+------------------------------------------------------------------+
-double IndependentTp(const bool isBuy, const double extreme, const double maxW,
+double IndependentTp(const bool isBuy, const double extreme, const double u,
                      const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
-   double tp = isBuy ? (extreme + maxW * 0.5) : (extreme - maxW * 0.5);
-   const double oppExtreme = NearestOppositeExtreme(isBuy, extreme, liveCl, liveBuy, nLive);
+   double tp = MandiriTp(isBuy, extreme, u);
+   const double oppExtreme = NearestOppositeExtreme(isBuy, extreme, u, liveCl, liveBuy, nLive);
    if(oppExtreme <= 0.0)
       return(tp);
    const double gap = isBuy ? (oppExtreme - extreme) : (extreme - oppExtreme);
-   if(gap < maxW)
+   const double crossThresh = 2.0 * UTpDist(u);
+   if(gap < crossThresh)
       tp = (extreme + oppExtreme) * 0.5;
    return(tp);
   }
 
 //+------------------------------------------------------------------+
 void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired,
-                       const double maxW)
+                       const double u)
   {
    if(!InpSendOrders || InpLot <= 0.0)
       return;
@@ -2940,7 +3101,7 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       return;
 
-   const double buf = ClBufferPrice();
+   const double buf = UClDist(u);
 
    int buyIdx[];
    int sellIdx[];
@@ -2978,9 +3139,9 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
         }
       const double tp = (g_zones[atapIdx].high + g_zones[lantaiIdx].low) * 0.5;
       if(!ClBrokenOnClosedBar(false, clS, DetectionTF()))
-         SendSide(false, true, g_zones[atapIdx].high, tp, ts);
+         SendSide(false, true, g_zones[atapIdx].high, tp, u, ts);
       if(!ClBrokenOnClosedBar(true, clB, DetectionTF()))
-         SendSide(true, true, g_zones[lantaiIdx].low, tp, ts);
+         SendSide(true, true, g_zones[lantaiIdx].low, tp, u, ts);
      }
 
    for(int i = 0; i < nBuy; i++)
@@ -2995,8 +3156,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
          ts = StampNow(stamp);
          stamp++;
         }
-      const double tp = IndependentTp(true, g_zones[z].low, maxW, liveCl, liveBuy, nLive);
-      SendSide(true, false, g_zones[z].low, tp, ts);
+      const double tp = IndependentTp(true, g_zones[z].low, u, liveCl, liveBuy, nLive);
+      SendSide(true, false, g_zones[z].low, tp, u, ts);
      }
    for(int i = 0; i < nSell; i++)
      {
@@ -3010,8 +3171,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
          ts = StampNow(stamp);
          stamp++;
         }
-      const double tp = IndependentTp(false, g_zones[z].high, maxW, liveCl, liveBuy, nLive);
-      SendSide(false, false, g_zones[z].high, tp, ts);
+      const double tp = IndependentTp(false, g_zones[z].high, u, liveCl, liveBuy, nLive);
+      SendSide(false, false, g_zones[z].high, tp, u, ts);
      }
   }
 
@@ -3101,7 +3262,7 @@ int FindGroupIndex(const string code)
 //+------------------------------------------------------------------+
 int FindZoneIndexForCl(const bool isBuy, const double cl)
   {
-   const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
+   const double u = ComputeU();
    const int nz = ArraySize(g_zones);
    for(int z = 0; z < nz; z++)
      {
@@ -3109,7 +3270,7 @@ int FindZoneIndexForCl(const bool isBuy, const double cl)
          continue;
       double zcl = 0.0;
       double ztp = 0.0;
-      ZoneClTp(g_zones[z], maxW, zcl, ztp);
+      ZoneClTp(g_zones[z], u, zcl, ztp);
       if(SameCl(zcl, cl))
          return(z);
      }
@@ -3543,13 +3704,13 @@ void DeletePendingInGroup(PacGroup &g, const string tag)
   }
 
 //+------------------------------------------------------------------+
-void QueueTpReentry(const string groupCode, const Snapshot &snap)
+void QueueTpReentry(const PacCmt &pac)
   {
-   int bi = FindBatchIndex(groupCode);
+   int bi = FindBatchIndex(pac.groupCode);
    if(bi < 0)
      {
       TpBatch b;
-      b.groupCode     = groupCode;
+      b.groupCode     = pac.groupCode;
       b.windowStartMs = GetTickCount64();
       ArrayResize(b.slots, 0);
       const int n = ArraySize(g_tpBatches);
@@ -3559,12 +3720,11 @@ void QueueTpReentry(const string groupCode, const Snapshot &snap)
      }
 
    TpSlot slot;
-   slot.comment = snap.comment;
-   slot.entry   = snap.entry;
-   slot.sl      = snap.sl;
-   slot.tp      = snap.tp;
-   slot.lot     = snap.lot;
-   slot.isBuy   = snap.isBuy;
+   slot.isBuy      = pac.isBuy;
+   slot.layerCount = pac.layerCount;
+   slot.position   = pac.position;
+   slot.clPrice    = pac.clPrice;
+   slot.stamp      = pac.stamp;
    const int ns = ArraySize(g_tpBatches[bi].slots);
    ArrayResize(g_tpBatches[bi].slots, ns + 1);
    g_tpBatches[bi].slots[ns] = slot;
@@ -3582,16 +3742,34 @@ void RemoveTpBatchAt(const int index)
   }
 
 //+------------------------------------------------------------------+
-bool PlaceReentry(const TpSlot &slot)
+//| Reentry menghitung ulang Entry/CL/SL/TP dari nol pakai U saat ini |
+//| (bisa beda dari kirim pertama, lihat aturan U di ComputeU()).     |
+//| Anchor dicari lagi dari g_zones lewat clPrice yg tersimpan di     |
+//| slot -- zona itu sendiri (high/low mentah) tidak pernah berubah   |
+//| terlepas dari U, jadi aman dipakai sebagai referensi permanen.    |
+//| Paired/mandiri dihitung ulang fresh via IndependentTp (kalau      |
+//| ternyata masih nyilang dgn sisi lawan, otomatis di-clamp sama     |
+//| seperti entry baru biasa).                                       |
+//+------------------------------------------------------------------+
+bool PlaceReentry(const TpSlot &slot, const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
-   PacCmt p;
-   if(ParsePacCommentEx(slot.comment, p) && HasPacLayer(p.isBuy, p.clPrice, p.position))
+   const int zi = FindZoneIndexForCl(slot.isBuy, slot.clPrice);
+   if(zi < 0)
+      return(false);
+   const double anchor = slot.isBuy ? g_zones[zi].low : g_zones[zi].high;
+   const double u = ComputeU();
+   double entry1 = 0.0, cl = 0.0, sl = 0.0;
+   CalcEntryClSl(slot.isBuy, anchor, u, entry1, cl, sl);
+   if(HasPacLayer(slot.isBuy, cl, slot.position))
       return(true);
-   const double entry = NormalizePrice(slot.entry);
-   const double lot   = NormalizeLot(slot.lot);
-   if(PlacePending(slot.isBuy, lot, entry, slot.sl, slot.tp, slot.comment))
+   const double tp = IndependentTp(slot.isBuy, anchor, u, liveCl, liveBuy, nLive);
+   const int n = MathMax(slot.layerCount, 1);
+   const double entry = NormalizePrice(entry1 + (anchor - entry1) * (double)(slot.position - 1) / (double)n);
+   const double lot = LayerLot(slot.position);
+   const string cmt = MakeComment(false, slot.isBuy, slot.layerCount, slot.position, cl, slot.stamp);
+   if(PlacePending(slot.isBuy, lot, entry, sl, NormalizePrice(tp), cmt))
      {
-      Print("PAC reentry: ", slot.comment, " @ ", DoubleToString(entry, _Digits));
+      Print("PAC reentry: ", cmt, " @ ", DoubleToString(entry, _Digits));
       return(true);
      }
    return(false);
@@ -3602,6 +3780,11 @@ void ProcessTpBatches()
   {
    const ulong nowMs = GetTickCount64();
    const ulong win   = (ulong)MathMax(InpTpWindowMs, 100);
+
+   double liveCl[];
+   bool   liveBuy[];
+   int    nLive = 0;
+   bool   liveBuilt = false;
 
    for(int i = ArraySize(g_tpBatches) - 1; i >= 0; i--)
      {
@@ -3640,10 +3823,17 @@ void ProcessTpBatches()
       if(IsDisabledDayWib())
          continue;
 
+      if(!liveBuilt)
+        {
+         int buyIdx[], sellIdx[], nBuy = 0, nSell = 0;
+         BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
+         liveBuilt = true;
+        }
+
       int okCount = 0;
       for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
         {
-         if(PlaceReentry(g_tpBatches[i].slots[s]))
+         if(PlaceReentry(g_tpBatches[i].slots[s], liveCl, liveBuy, nLive))
             okCount++;
         }
 
@@ -3897,7 +4087,7 @@ void HandleTradeTransaction(const MqlTradeTransaction &trans)
 
    if(reason == DEAL_REASON_TP)
      {
-      QueueTpReentry(pac.groupCode, snap);
+      QueueTpReentry(pac);
       if(!g_inRefresh)
          ManageOrders();
       return;
