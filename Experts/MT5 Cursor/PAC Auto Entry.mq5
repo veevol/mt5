@@ -37,6 +37,12 @@ enum ENUM_HOUR_FILTER_MODE
    HOUR_BLOCK_ENTRY_ONLY = 2, // Cuma blokir entry baru, biarkan semua yg sudah ada
   };
 
+enum ENUM_CL_MODE
+  {
+   CL_FIXED_PIPS   = 0, // Pip tetap (InpCLBuffer)
+   CL_PERCENT_AREA = 1, // % x jarak Extreme-Entry asumsi mandiri (gaya GSC Assistant)
+  };
+
 enum ENUM_DETECTION_TF
   {
    TF_AUTO = 0,           // Auto
@@ -79,7 +85,9 @@ input color             InpResistColor  = clrFireBrick;   // DBD - Warna Zona
 
 input group "=== Area ==="
 input int InpMaxAreaWidth = 600; // Jarak max Atap-Lantai (pips)
-input int InpCLBuffer     = 90;  // Buffer CL (pips)
+input ENUM_CL_MODE InpCLMode = CL_FIXED_PIPS; // Mode hitung buffer CL
+input int InpCLBuffer     = 90;  // Buffer CL - pip tetap (mode CL_FIXED_PIPS)
+input int InpCLPercentArea = 30; // Buffer CL - % x jarak Extreme-Entry asumsi mandiri (mode CL_PERCENT_AREA, gaya GSC Assistant)
 input int InpSLRatio      = 300; // Rasio SL-CL vs CL-TP (%)
 input int InpLayerCount   = 3;   // Jumlah layer
 
@@ -1048,6 +1056,12 @@ int OnInit()
      }
    if(InpDisableThursday)
       Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
+   if(InpCLMode == CL_PERCENT_AREA)
+      Print("PAC CL mode: PERCENT_AREA (", InpCLPercentArea,
+            "% x jarak Extreme-Entry asumsi mandiri, gaya GSC Assistant). Buffer saat ini: ",
+            DoubleToString(ClBufferPrice() / PipSize(), 1), " pip.");
+   else
+      Print("PAC CL mode: FIXED_PIPS (", InpCLBuffer, " pip tetap).");
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
@@ -1187,6 +1201,24 @@ double PipSize()
    if(digits == 3 || digits == 5)
       return(pt * 10.0);
    return(pt);
+  }
+
+//+------------------------------------------------------------------+
+//| Buffer CL dalam harga. Mode CL_PERCENT_AREA pakai jarak Extreme- |
+//| Entry versi mandiri (seperempat InpMaxAreaWidth) sebagai basis,  |
+//| dipakai seragam di semua tempat (termasuk zona yang akhirnya di- |
+//| pair) supaya tracking CL/eligibility antar fungsi tetap          |
+//| konsisten -- gaya GSC Assistant: CL = n% x jarak Extreme-Entry.  |
+//+------------------------------------------------------------------+
+double ClBufferPrice()
+  {
+   if(InpCLMode == CL_PERCENT_AREA)
+     {
+      const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
+      const double areaQuarter = maxW * 0.25;
+      return(areaQuarter * MathMax(InpCLPercentArea, 0) / 100.0);
+     }
+   return(MathMax(InpCLBuffer, 0) * PipSize());
   }
 
 //+------------------------------------------------------------------+
@@ -1824,14 +1856,14 @@ void RememberClcc(const PacGroup &g)
 //+------------------------------------------------------------------+
 void ApplyClccToZones()
   {
-   const double pip = PipSize();
+   const double buf = ClBufferPrice();
    const int n = ArraySize(g_zones);
    for(int i = 0; i < n; i++)
      {
       const bool isBuy = g_zones[i].isSupport;
       const double cl = isBuy
-                        ? NormalizePrice(g_zones[i].low - MathMax(InpCLBuffer, 0) * pip)
-                        : NormalizePrice(g_zones[i].high + MathMax(InpCLBuffer, 0) * pip);
+                        ? NormalizePrice(g_zones[i].low - buf)
+                        : NormalizePrice(g_zones[i].high + buf);
       if(WasClcc(isBuy, cl))
          g_zones[i].isWeak = true;
      }
@@ -1845,9 +1877,10 @@ bool ZoneOrderEligible(const SrZone &z)
    if(z.pivotTouches >= MaxPivotTouches())
       return(false);
    const bool isBuy = z.isSupport;
+   const double buf = ClBufferPrice();
    const double cl = isBuy
-                     ? NormalizePrice(z.low - MathMax(InpCLBuffer, 0) * PipSize())
-                     : NormalizePrice(z.high + MathMax(InpCLBuffer, 0) * PipSize());
+                     ? NormalizePrice(z.low - buf)
+                     : NormalizePrice(z.high + buf);
    return(!WasClcc(isBuy, cl));
   }
 
@@ -1872,8 +1905,7 @@ int MaxPivotTouches()
 //+------------------------------------------------------------------+
 void ZoneClTp(const SrZone &z, const double maxW, double &cl, double &tp)
   {
-   const double pip = PipSize();
-   const double buf = MathMax(InpCLBuffer, 0) * pip;
+   const double buf = ClBufferPrice();
    if(z.isSupport)
      {
       cl = NormalizePrice(z.low - buf);
@@ -2203,8 +2235,7 @@ double LayerLot(const int pos)
 void CalcEntryClSl(const bool isBuy, const double extreme, const double tp,
                    double &entry1, double &cl, double &sl)
   {
-   const double pip = PipSize();
-   const double clBuf = MathMax(InpCLBuffer, 0) * pip;
+   const double clBuf = ClBufferPrice();
    const double ratio = MathMax(InpSLRatio, 0) / 100.0;
    if(isBuy)
      {
@@ -2692,7 +2723,7 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
    LiveItem items[];
    CollectItems(items);
    const double maxW = MathMax(InpMaxAreaWidth, 1) * PipSize();
-   const double pip  = PipSize();
+   const double buf  = ClBufferPrice();
    double keepB[];
    double keepS[];
    int nkb = 0;
@@ -2701,7 +2732,7 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
    CollectNearestZones(false, bid, maxW, sellIdx, nSell, keepS, nks, items);
    for(int i = 0; i < nBuy; i++)
      {
-      const double cl = NormalizePrice(g_zones[buyIdx[i]].low - MathMax(InpCLBuffer, 0) * pip);
+      const double cl = NormalizePrice(g_zones[buyIdx[i]].low - buf);
       nLive++;
       ArrayResize(liveCl, nLive);
       ArrayResize(liveBuy, nLive);
@@ -2729,7 +2760,7 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
      }
    for(int i = 0; i < nSell; i++)
      {
-      const double cl = NormalizePrice(g_zones[sellIdx[i]].high + MathMax(InpCLBuffer, 0) * pip);
+      const double cl = NormalizePrice(g_zones[sellIdx[i]].high + buf);
       nLive++;
       ArrayResize(liveCl, nLive);
       ArrayResize(liveBuy, nLive);
@@ -2844,7 +2875,7 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
 double NearestOppositeExtreme(const bool isBuy, const double extreme,
                               const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
-   const double buf = MathMax(InpCLBuffer, 0) * PipSize();
+   const double buf = ClBufferPrice();
    double best = 0.0;
    double bestDist = DBL_MAX;
    for(int i = 0; i < nLive; i++)
@@ -2909,7 +2940,7 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
       return;
 
-   const double pip = PipSize();
+   const double buf = ClBufferPrice();
 
    int buyIdx[];
    int sellIdx[];
@@ -2929,8 +2960,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
 
    if(pairKeep)
      {
-      const double clS = NormalizePrice(g_zones[atapIdx].high + MathMax(InpCLBuffer, 0) * pip);
-      const double clB = NormalizePrice(g_zones[lantaiIdx].low - MathMax(InpCLBuffer, 0) * pip);
+      const double clS = NormalizePrice(g_zones[atapIdx].high + buf);
+      const double clB = NormalizePrice(g_zones[lantaiIdx].low - buf);
       string tsS = "";
       string tsB = "";
       HasPacSide(false, clS, tsS);
@@ -2957,7 +2988,7 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       const int z = buyIdx[i];
       if(pairKeep && z == lantaiIdx)
          continue;
-      const double cl = NormalizePrice(g_zones[z].low - MathMax(InpCLBuffer, 0) * pip);
+      const double cl = NormalizePrice(g_zones[z].low - buf);
       string ts = "";
       if(!HasPacSide(true, cl, ts) || StringLen(ts) == 0)
         {
@@ -2972,7 +3003,7 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       const int z = sellIdx[i];
       if(pairKeep && z == atapIdx)
          continue;
-      const double cl = NormalizePrice(g_zones[z].high + MathMax(InpCLBuffer, 0) * pip);
+      const double cl = NormalizePrice(g_zones[z].high + buf);
       string ts = "";
       if(!HasPacSide(false, cl, ts) || StringLen(ts) == 0)
         {
