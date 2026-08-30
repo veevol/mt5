@@ -102,6 +102,9 @@ input group "=== Filter Jam ==="
 input bool InpHourFilter = true; // Filter jam rawan rugi (WIB, hasil analisis backtest multi-run)
 input ENUM_HOUR_FILTER_MODE InpHourFilterMode = HOUR_FLATTEN_ALL; // Aksi saat jendela jam aktif
 
+input group "=== Tampilan Chart (Tester) ==="
+input bool InpChartLiteMode = false; // Mode ringan: sembunyikan zona kadaluarsa (kurangi jumlah objek chart)
+
 //+------------------------------------------------------------------+
 //| CONST                                                            |
 //+------------------------------------------------------------------+
@@ -116,11 +119,9 @@ const string PREFIX_ATAP   = "PAC_ATAP";
 const string PREFIX_LANTAI = "PAC_LANTAI";
 const string PREFIX_LV     = "PAC_LV_";
 const string PREFIX_NEWS   = "PAC_NEWS_";
-const color  NEWS_CLR_ON   = clrOrangeRed;      // jendela aktif
-const color  NEWS_CLR_OFF  = clrMediumSeaGreen; // jendela inaktif
+const color  NEWS_CLR      = clrMediumOrchid;   // ungu - garis & label filter berita
 const string PREFIX_HOUR   = "PAC_HOUR_";
-const color  HOUR_CLR_ON   = clrDeepSkyBlue;    // jendela jam mulai
-const color  HOUR_CLR_OFF  = clrSlateGray;      // jendela jam berakhir
+const color  HOUR_CLR      = clrDeepSkyBlue;    // biru muda - garis & label filter jam
 const double BASE_BODY_RATIO  = 0.5; // |Close-Open| â‰¤ rasio Ã— (High-Low)
 const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low)
 const long   InpMagic         = 999; // Magic Number EA PAC (bukan 0)
@@ -826,7 +827,7 @@ double NewsLabelPrice(const datetime t)
   }
 
 //+------------------------------------------------------------------+
-void CreateNewsLabel(const string name, const datetime t, const string text)
+void CreateNewsLabel(const string name, const datetime t, const string text, const color clr)
   {
    if(t <= 0 || text == "")
       return;
@@ -837,7 +838,7 @@ void CreateNewsLabel(const string name, const datetime t, const string text)
    ObjectSetString(0, name, OBJPROP_TEXT, text);
    ObjectSetString(0, name, OBJPROP_FONT, "Arial");
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, NEWS_CLR_ON);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
    ObjectSetInteger(0, name, OBJPROP_BACK, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
@@ -867,15 +868,14 @@ void DrawNewsMarks()
       if(utc <= 0)
          continue;
       const string major = NewsMajorText(i);
-      const datetime tRel = UtcToHfmChart(utc);
       const datetime tOn  = UtcToHfmChart(utc - before);
       const datetime tOff = UtcToHfmChart(utc + after);
       const string id = IntegerToString(i);
-      CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, NEWS_CLR_ON, STYLE_DASH,
+      CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, NEWS_CLR, STYLE_DASH,
                       major + " | jendela aktif");
-      CreateNewsVLine(PREFIX_NEWS + "OFF_" + id, tOff, NEWS_CLR_OFF, STYLE_DOT,
+      CreateNewsVLine(PREFIX_NEWS + "OFF_" + id, tOff, NEWS_CLR, STYLE_DOT,
                       major + " | jendela inaktif");
-      CreateNewsLabel(PREFIX_NEWS + "LB_" + id, tRel, major);
+      CreateNewsLabel(PREFIX_NEWS + "LB_" + id, tOn, major, NEWS_CLR);
      }
   }
 
@@ -917,10 +917,11 @@ void DrawHourMarks()
          const datetime tOnServer  = WibToServer(tOnWib);
          const datetime tOffServer = WibToServer(tOffWib);
          const string id = IntegerToString(idx++);
-         CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, HOUR_CLR_ON, STYLE_DASH,
+         CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, HOUR_CLR, STYLE_DASH,
                          g_hourWindows[w].label + " | jendela jam mulai");
-         CreateNewsVLine(PREFIX_HOUR + "OFF_" + id, tOffServer, HOUR_CLR_OFF, STYLE_DOT,
+         CreateNewsVLine(PREFIX_HOUR + "OFF_" + id, tOffServer, HOUR_CLR, STYLE_DOT,
                          g_hourWindows[w].label + " | jendela jam berakhir");
+         CreateNewsLabel(PREFIX_HOUR + "LB_" + id, tOnServer, g_hourWindows[w].label, HOUR_CLR);
         }
      }
   }
@@ -1697,9 +1698,11 @@ void DrawSrZones()
 //+------------------------------------------------------------------+
 void CreateSrRect(const SrZone &z)
   {
-   const string name = (z.isSupport ? PREFIX_SUP : PREFIX_RES) + IntegerToString((long)z.left);
    const bool aktif  = (z.isControl && !z.isWeak);
    const bool off    = (z.isControl && z.isWeak);
+   if(InpChartLiteMode && off)
+      return; // zona kadaluarsa disembunyikan di mode chart ringan
+   const string name = (z.isSupport ? PREFIX_SUP : PREFIX_RES) + IntegerToString((long)z.left);
    const string side = z.isSupport ? "Lantai" : "Atap";
 
    if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, z.left, z.high, z.right, z.low))
