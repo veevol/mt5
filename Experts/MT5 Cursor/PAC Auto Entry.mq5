@@ -30,6 +30,13 @@ enum ENUM_PIVOT_MARK
    MARK_TRIANGLE   = 241  // Segitiga atas/bawah
   };
 
+enum ENUM_HOUR_FILTER_MODE
+  {
+   HOUR_FLATTEN_ALL      = 0, // Tutup semua posisi + hapus pending
+   HOUR_CANCEL_PENDING   = 1, // Hanya hapus pending, biarkan posisi terbuka jalan
+   HOUR_BLOCK_ENTRY_ONLY = 2, // Cuma blokir entry baru, biarkan semua yg sudah ada
+  };
+
 enum ENUM_DETECTION_TF
   {
    TF_AUTO = 0,           // Auto
@@ -93,6 +100,7 @@ input int  InpNewsMinsAfter  = 60;   // Menit sesudah rilis
 
 input group "=== Filter Jam ==="
 input bool InpHourFilter = true; // Filter jam rawan rugi (WIB, hasil analisis backtest multi-run)
+input ENUM_HOUR_FILTER_MODE InpHourFilterMode = HOUR_FLATTEN_ALL; // Aksi saat jendela jam aktif
 
 //+------------------------------------------------------------------+
 //| CONST                                                            |
@@ -110,6 +118,9 @@ const string PREFIX_LV     = "PAC_LV_";
 const string PREFIX_NEWS   = "PAC_NEWS_";
 const color  NEWS_CLR_ON   = clrOrangeRed;      // jendela aktif
 const color  NEWS_CLR_OFF  = clrMediumSeaGreen; // jendela inaktif
+const string PREFIX_HOUR   = "PAC_HOUR_";
+const color  HOUR_CLR_ON   = clrDeepSkyBlue;    // jendela jam mulai
+const color  HOUR_CLR_OFF  = clrSlateGray;      // jendela jam berakhir
 const double BASE_BODY_RATIO  = 0.5; // |Close-Open| â‰¤ rasio Ã— (High-Low)
 const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low)
 const long   InpMagic         = 999; // Magic Number EA PAC (bukan 0)
@@ -751,6 +762,16 @@ bool InHourFilterWindow(string &labelOut)
   }
 
 //+------------------------------------------------------------------+
+//| WIB (UTC+7 tetap) -> waktu server HFM, buat gambar garis chart.  |
+//+------------------------------------------------------------------+
+datetime WibToServer(const datetime wib)
+  {
+   if(wib <= 0)
+      return(0);
+   return(UtcToHfmChart(wib - 7 * 3600));
+  }
+
+//+------------------------------------------------------------------+
 bool InNewsWindow(string &nameOut)
   {
    nameOut = "";
@@ -859,6 +880,52 @@ void DrawNewsMarks()
   }
 
 //+------------------------------------------------------------------+
+void DeleteHourMarks()
+  {
+   ObjectsDeleteAll(0, PREFIX_HOUR);
+  }
+
+//+------------------------------------------------------------------+
+//| Gambar garis vertikal utk tiap jendela filter jam, diulang tiap  |
+//| hari WIB dari bar tertua yang termuat sampai 7 hari ke depan.    |
+//+------------------------------------------------------------------+
+void DrawHourMarks()
+  {
+   DeleteHourMarks();
+   if(!InpHourFilter || !ChartVisualsOn())
+      return;
+   const int totalBars = iBars(_Symbol, PERIOD_CURRENT);
+   if(totalBars <= 1)
+      return;
+   const datetime rangeStartServer = iTime(_Symbol, PERIOD_CURRENT, totalBars - 1);
+   const datetime rangeEndServer   = TimeCurrent() + 7 * 86400;
+   if(rangeStartServer <= 0 || rangeEndServer <= rangeStartServer)
+      return;
+
+   datetime wibStart = ServerToUtc(rangeStartServer) + 7 * 3600;
+   const datetime wibEnd = ServerToUtc(rangeEndServer) + 7 * 3600;
+   wibStart -= (wibStart % 86400); // turunkan ke tengah malam WIB
+
+   int idx = 0;
+   const int nWin = ArraySize(g_hourWindows);
+   for(datetime dayWib = wibStart; dayWib <= wibEnd; dayWib += 86400)
+     {
+      for(int w = 0; w < nWin; w++)
+        {
+         const datetime tOnWib  = dayWib + g_hourWindows[w].startMin * 60;
+         const datetime tOffWib = dayWib + g_hourWindows[w].endMin   * 60 + 60;
+         const datetime tOnServer  = WibToServer(tOnWib);
+         const datetime tOffServer = WibToServer(tOffWib);
+         const string id = IntegerToString(idx++);
+         CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, HOUR_CLR_ON, STYLE_DASH,
+                         g_hourWindows[w].label + " | jendela jam mulai");
+         CreateNewsVLine(PREFIX_HOUR + "OFF_" + id, tOffServer, HOUR_CLR_OFF, STYLE_DOT,
+                         g_hourWindows[w].label + " | jendela jam berakhir");
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
 void CancelNewsPendings()
   {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
@@ -950,12 +1017,17 @@ int OnInit()
       string hourList = "";
       for(int hw = 0; hw < ArraySize(g_hourWindows); hw++)
          hourList += (hw > 0 ? ", " : "") + g_hourWindows[hw].label;
-      Print("PAC hour filter ON. Tutup posisi + hapus pending saat jendela jam rawan rugi (WIB): ", hourList);
+      string modeText = "?";
+      if(InpHourFilterMode == HOUR_FLATTEN_ALL)      modeText = "tutup posisi + hapus pending";
+      if(InpHourFilterMode == HOUR_CANCEL_PENDING)   modeText = "hanya hapus pending, posisi terbuka jalan terus";
+      if(InpHourFilterMode == HOUR_BLOCK_ENTRY_ONLY) modeText = "cuma blokir entry baru, semua yg sudah ada dibiarkan";
+      Print("PAC hour filter ON (mode: ", modeText, "). Jendela jam rawan rugi (WIB): ", hourList);
      }
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
    DrawNewsMarks();
+   DrawHourMarks();
    g_lastBarTime = iTime(_Symbol, g_usedTF, 0);
    ManageOrders();
    if(!EventSetTimer(1))
@@ -969,6 +1041,7 @@ void OnDeinit(const int reason)
    EventKillTimer();
    DeleteMarks();
    DeleteNewsMarks();
+   DeleteHourMarks();
   }
 
 //+------------------------------------------------------------------+
@@ -3495,10 +3568,23 @@ void ApplyHourFilter()
      {
       if(hourLabel != g_lastHourFilterLabel)
         {
-         Print("PAC hour filter: ", hourLabel, " — tutup posisi & hapus pending");
+         string actionText = "cuma blokir entry baru";
+         if(InpHourFilterMode == HOUR_FLATTEN_ALL)
+            actionText = "tutup posisi & hapus pending";
+         else if(InpHourFilterMode == HOUR_CANCEL_PENDING)
+            actionText = "hapus pending, posisi terbuka jalan terus";
+         Print("PAC hour filter: ", hourLabel, " — ", actionText);
          g_lastHourFilterLabel = hourLabel;
         }
-      FlattenNewsExposure();
+      if(InpHourFilterMode == HOUR_FLATTEN_ALL)
+         FlattenNewsExposure();
+      else if(InpHourFilterMode == HOUR_CANCEL_PENDING)
+        {
+         ArrayResize(g_tpBatches, 0);
+         CancelNewsPendings();
+        }
+      // HOUR_BLOCK_ENTRY_ONLY: jangan sentuh posisi/pending yang sudah ada;
+      // entry baru sudah diblok lewat gate InHourFilterWindow() di tempat lain.
      }
    else
       g_lastHourFilterLabel = "";
