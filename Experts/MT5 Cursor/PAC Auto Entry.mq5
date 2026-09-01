@@ -54,8 +54,10 @@ enum ENUM_DAY_FILTER
 
 enum ENUM_U_MODE
   {
-   U_FIXED_PIPS = 0, // Pip tetap
-   U_ATR        = 1, // ATR(periode) di TF pilihan
+   U_FIXED_PIPS  = 0, // Fix Pip
+   U_ATR_CURRENT = 1, // ATR Current
+   U_ATR_H1      = 2, // ATR H1
+   U_ATR_D       = 3  // ATR D
   };
 
 enum ENUM_DETECTION_TF
@@ -99,12 +101,12 @@ input color             InpSupportColor = clrForestGreen; // RBR - Warna Zona
 input color             InpResistColor  = clrFireBrick;   // DBD - Warna Zona
 
 input group "=== Area (U = jarak Anchor-Entry) ==="
-input ENUM_U_MODE     InpUMode      = U_FIXED_PIPS;    // Sumber U
-input int              InpUPips      = 150;             // U - pip tetap (mode U_FIXED_PIPS)
-input int              InpUAtrPeriod = 14;              // U - periode ATR (mode U_ATR)
-input ENUM_TIMEFRAMES InpUAtrTF     = PERIOD_CURRENT;  // U - TF ATR (CURRENT = ikut TF deteksi)
+input ENUM_U_MODE InpUMode       = U_FIXED_PIPS; // Sumber U
+input int         InpUPips       = 150;          // U - pip tetap
+input int         InpUAtrPercent = 100;          // U - ATR %
 input int InpCLPercentArea = 30;  // Anchor->CL = % x U
 input int InpTPPercentArea = 200; // Anchor->TP = % x U
+input bool InpAutoPasangan = true; // Auto Pasangan
 input int InpSLPercentArea = 300; // Anchor->SL = % x U
 input int InpLayerCount    = 3;   // Jumlah layer
 
@@ -151,6 +153,7 @@ const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low
 const long   InpMagic         = 999; // Magic Number EA PAC (bukan 0)
 const int    InpDeviation     = 30;
 const int    InpTpWindowMs    = 1000;
+const int    U_ATR_PERIOD     = 14; // periode ATR U, bukan input
 
 struct Pivot
   {
@@ -294,6 +297,9 @@ ENUM_TIMEFRAMES DetectionTF()
   }
 
 //+------------------------------------------------------------------+
+//| Satu saklar live + tester visual: objek chart, timer 1s, Print.  |
+//| Optimasi dan tester tanpa tampilan chart = off.                  |
+//+------------------------------------------------------------------+
 bool ChartVisualsOn()
   {
    if(MQLInfoInteger(MQL_OPTIMIZATION) != 0)
@@ -301,6 +307,34 @@ bool ChartVisualsOn()
    if(MQLInfoInteger(MQL_TESTER) != 0 && MQLInfoInteger(MQL_VISUAL_MODE) == 0)
       return(false);
    return(true);
+  }
+
+//+------------------------------------------------------------------+
+bool UUsesAtr()
+  {
+   return(InpUMode != U_FIXED_PIPS);
+  }
+
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES UAtrTimeframe()
+  {
+   if(InpUMode == U_ATR_H1)
+      return(PERIOD_H1);
+   if(InpUMode == U_ATR_D)
+      return(PERIOD_D1);
+   return(DetectionTF());
+  }
+
+//+------------------------------------------------------------------+
+string USourceText()
+  {
+   if(InpUMode == U_ATR_CURRENT)
+      return(StringFormat("ATR Current(%d) x %d%%", U_ATR_PERIOD, MathMax(InpUAtrPercent, 0)));
+   if(InpUMode == U_ATR_H1)
+      return(StringFormat("ATR H1(%d) x %d%%", U_ATR_PERIOD, MathMax(InpUAtrPercent, 0)));
+   if(InpUMode == U_ATR_D)
+      return(StringFormat("ATR D(%d) x %d%%", U_ATR_PERIOD, MathMax(InpUAtrPercent, 0)));
+   return("Fix Pip");
   }
 
 //+------------------------------------------------------------------+
@@ -1401,7 +1435,7 @@ void CancelNewsPendings()
          continue;
       const string cmt = OrderGetString(ORDER_COMMENT);
       if(g_trade.OrderDelete(ticket) && TradeOk())
-         Print("PAC news: hapus pending ", cmt);
+         if(ChartVisualsOn()) Print("PAC news: hapus pending ", cmt);
      }
   }
 
@@ -1419,10 +1453,14 @@ void CloseNewsPositions()
          continue;
       const string cmt = PositionGetString(POSITION_COMMENT);
       if(g_trade.PositionClose(ticket) && TradeOk())
-         Print("PAC news: tutup posisi #", ticket, " ", cmt);
+        {
+         if(ChartVisualsOn()) Print("PAC news: tutup posisi #", ticket, " ", cmt);
+        }
       else
-         Print("PAC news: gagal tutup #", ticket, " ret=",
+        {
+         if(ChartVisualsOn()) Print("PAC news: gagal tutup #", ticket, " ret=",
                g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+        }
      }
   }
 
@@ -1467,21 +1505,20 @@ int OnInit()
    g_lastNewsName = "";
    InitNewsCalendar();
 
-   if(InpUMode == U_ATR)
+   if(UUsesAtr())
      {
-      const ENUM_TIMEFRAMES atrTf = (InpUAtrTF == PERIOD_CURRENT) ? DetectionTF() : InpUAtrTF;
-      g_atrHandle = iATR(_Symbol, atrTf, MathMax(InpUAtrPeriod, 1));
+      g_atrHandle = iATR(_Symbol, UAtrTimeframe(), U_ATR_PERIOD);
       if(g_atrHandle == INVALID_HANDLE)
-         Print("PAC: gagal membuat handle ATR untuk mode U_ATR, fallback ke pip tetap.");
+         if(ChartVisualsOn()) Print("PAC: gagal membuat handle ATR, fallback ke pip tetap.");
      }
 
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
-      Print("PAC: akun bukan hedging — layer bisa tergabung.");
+      if(ChartVisualsOn()) Print("PAC: akun bukan hedging — layer bisa tergabung.");
    if(NewsFilterOn())
      {
       int beforeMin = 0, afterMin = 0;
       NewsWindowMins(beforeMin, afterMin);
-      Print("PAC news filter ON. Tutup posisi + hapus pending. Jendela ",
+      if(ChartVisualsOn()) Print("PAC news filter ON. Tutup posisi + hapus pending. Jendela ",
             beforeMin, " mnt sebelum / ", afterMin,
             " mnt sesudah rilis. Hardcode Investing high-impact USD ",
             IntegerToString(NewsCount()), " event, 1 Jan 2025-31 Agu 2026 USD+EUR. Filter & garis chart jam HFM.");
@@ -1495,16 +1532,15 @@ int OnInit()
       if(InpHourFilter == HOUR_FLATTEN_ALL)      modeText = "Tutup Semua";
       if(InpHourFilter == HOUR_CANCEL_PENDING)   modeText = "Hanya Pending";
       if(InpHourFilter == HOUR_BLOCK_ENTRY_ONLY) modeText = "Blokir Entri Baru";
-      Print("PAC hour filter ON (mode: ", modeText, "). Jendela jam rawan rugi (WIB): ", hourList);
+      if(ChartVisualsOn()) Print("PAC hour filter ON (mode: ", modeText, "). Jendela jam rawan rugi (WIB): ", hourList);
      }
    if(DayFilterOn())
-      Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
+      if(ChartVisualsOn()) Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
    if(InpTpAdaptive)
-      Print("PAC TP adaptif ON: TP bisa menyempit ke zona standby terdekat, tidak pernah melebar.");
+      if(ChartVisualsOn()) Print("PAC TP adaptif ON: TP bisa menyempit ke zona standby terdekat, tidak pernah melebar.");
    {
       const double u0 = ComputeU();
-      const string uSrc = (InpUMode == U_ATR) ? StringFormat("ATR(%d)", InpUAtrPeriod) : "pip tetap";
-      Print("PAC U (Anchor->Entry) sumber: ", uSrc, ", saat ini = ",
+      if(ChartVisualsOn()) Print("PAC U (Anchor->Entry) sumber: ", USourceText(), ", saat ini = ",
             DoubleToString(u0 / PipSize(), 1), " pip. Anchor->CL=", InpCLPercentArea,
             "% Anchor->TP=", InpTPPercentArea, "% Anchor->SL=", InpSLPercentArea, "% dari U.");
    }
@@ -1515,8 +1551,11 @@ int OnInit()
    DrawHourMarks();
    g_lastBarTime = iTime(_Symbol, g_usedTF, 0);
    ManageOrders();
-   if(!EventSetTimer(1))
-      Print("PAC: EventSetTimer gagal — reentry TP window hanya saat ada tick.");
+   if(ChartVisualsOn())
+     {
+      if(!EventSetTimer(1))
+         if(ChartVisualsOn()) Print("PAC: EventSetTimer gagal — reentry TP window hanya saat ada tick.");
+     }
    return(INIT_SUCCEEDED);
   }
 
@@ -1665,11 +1704,15 @@ double PipSize()
 //+------------------------------------------------------------------+
 double ComputeU()
   {
-   if(InpUMode == U_ATR && g_atrHandle != INVALID_HANDLE)
+   if(UUsesAtr() && g_atrHandle != INVALID_HANDLE)
      {
       double buf[];
       if(CopyBuffer(g_atrHandle, 0, 1, 1, buf) > 0 && buf[0] > 0.0)
-         return(buf[0]);
+        {
+         const double u = buf[0] * MathMax(InpUAtrPercent, 0) / 100.0;
+         if(u > 0.0)
+            return(u);
+        }
      }
    return(MathMax(InpUPips, 1) * PipSize());
   }
@@ -1680,12 +1723,36 @@ double UTpDist(const double u) { return(u * MathMax(InpTPPercentArea, 0) / 100.0
 double USlDist(const double u) { return(u * MathMax(InpSLPercentArea, 0) / 100.0); }
 
 //+------------------------------------------------------------------+
-//| TP mandiri (Anchor +/- Anchor->TP), sebelum dicek silang dgn sisi |
-//| lawan -- lihat IndependentTp().                                  |
+//| TP mandiri (Anchor +/- Anchor->TP).                               |
 //+------------------------------------------------------------------+
 double MandiriTp(const bool isBuy, const double extreme, const double u)
   {
    return(isBuy ? extreme + UTpDist(u) : extreme - UTpDist(u));
+  }
+
+//+------------------------------------------------------------------+
+//| Auto Pasangan: titik tengah valid jika 2U < jarak Atap-Lantai    |
+//| dan jarak masih <= 2x Anchor->TP (kalau lebih lebar, mandiri).   |
+//+------------------------------------------------------------------+
+bool GapAllowsPasangan(const double gap, const double u)
+  {
+   if(u <= 0.0 || gap <= 0.0)
+      return(false);
+   if(gap <= 2.0 * u)
+      return(false);
+   if(gap > 2.0 * UTpDist(u))
+      return(false);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+bool AutoPairZones(const double atap, const double lantai, const double u)
+  {
+   if(!InpAutoPasangan)
+      return(false);
+   if(atap <= lantai)
+      return(false);
+   return(GapAllowsPasangan(atap - lantai, u));
   }
 
 //+------------------------------------------------------------------+
@@ -2264,8 +2331,11 @@ void CreateSrRect(const SrZone &z)
 
 //+------------------------------------------------------------------+
 void CreateLevelLine(const string name, const double price, const color clr, const string tip,
+                     const string label,
                      const ENUM_LINE_STYLE style = STYLE_SOLID, const int width = 2)
   {
+   if(price <= 0.0)
+      return;
    if(!ObjectCreate(0, name, OBJ_HLINE, 0, 0, price))
       return;
    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
@@ -2276,6 +2346,26 @@ void CreateLevelLine(const string name, const double price, const color clr, con
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   if(label == "")
+      return;
+
+   datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(t <= 0)
+      t = TimeCurrent();
+   t += (datetime)PeriodSeconds();
+   const string lb = name + "_LB";
+   if(!ObjectCreate(0, lb, OBJ_TEXT, 0, t, price))
+      return;
+   ObjectSetString(0, lb, OBJPROP_TEXT, label);
+   ObjectSetString(0, lb, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, lb, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, lb, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, lb, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, lb, OBJPROP_BACK, false);
+   ObjectSetInteger(0, lb, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, lb, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, lb, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, lb, OBJPROP_TOOLTIP, tip);
   }
 
 //+------------------------------------------------------------------+
@@ -2398,20 +2488,20 @@ void ModifyItemTp(const LiveItem &it, const double newTp)
    if(it.isPosition)
      {
       if(!g_trade.PositionModify(it.ticket, it.sl, tpN) || !TradeOk())
-         Print("PAC TP adaptif: gagal modif posisi #", it.ticket);
+         if(ChartVisualsOn()) Print("PAC TP adaptif: gagal modif posisi #", it.ticket);
      }
    else
      {
       if(!g_trade.OrderModify(it.ticket, it.price, it.sl, tpN, ORDER_TIME_GTC, 0) || !TradeOk())
-         Print("PAC TP adaptif: gagal modif pending #", it.ticket);
+         if(ChartVisualsOn()) Print("PAC TP adaptif: gagal modif pending #", it.ticket);
      }
   }
 
 //+------------------------------------------------------------------+
 //| Tarik TP tiap grup live yang punya zona standby menghalangi di    |
 //| antara Entry (posisi/pending layer 1) dan TP saat ini. Satu arah  |
-//| (menyempit saja) & berlaku juga utk grup Paired -- lihat catatan  |
-//| TightestStandbyTp soal kenapa ini otomatis tidak pernah melebar.  |
+//| (menyempit saja). Lihat TightestStandbyTp soal kenapa TP tidak    |
+//| pernah melebar.                                                   |
 //+------------------------------------------------------------------+
 void ApplyTpAdaptive()
   {
@@ -2464,7 +2554,7 @@ void ApplyTpAdaptive()
             continue;
          ModifyItemTp(items[i], newTp);
         }
-      Print("PAC TP adaptif: ", codes[g], " TP ditarik ke ", DoubleToString(newTp, _Digits));
+      if(ChartVisualsOn()) Print("PAC TP adaptif: ", codes[g], " TP ditarik ke ", DoubleToString(newTp, _Digits));
      }
   }
 
@@ -2517,43 +2607,6 @@ bool TpClOverlap(const double clA, const double tpA,
   }
 
 //+------------------------------------------------------------------+
-void CollectPacSideRanges(const bool wantBuy, double &cl[], double &tp[], int &nOut,
-                          const LiveItem &items[])
-  {
-   nOut = 0;
-   ArrayResize(cl, 0);
-   ArrayResize(tp, 0);
-   for(int i = 0; i < ArraySize(items); i++)
-     {
-      if(!items[i].parsed)
-         continue;
-      if(items[i].pac.isBuy != wantBuy)
-         continue;
-      const double c = items[i].pac.clPrice;
-      const double t = items[i].tp;
-      if(c <= 0.0)
-         continue;
-      bool dup = false;
-      for(int k = 0; k < nOut; k++)
-        {
-         if(!SameCl(cl[k], c))
-            continue;
-         if(t > 0.0 && (tp[k] <= 0.0 || MathAbs(t - c) > MathAbs(tp[k] - c)))
-            tp[k] = t;
-         dup = true;
-         break;
-        }
-      if(dup)
-         continue;
-      nOut++;
-      ArrayResize(cl, nOut);
-      ArrayResize(tp, nOut);
-      cl[nOut - 1] = c;
-      tp[nOut - 1] = t;
-     }
-  }
-
-//+------------------------------------------------------------------+
 bool IdxHas(const int &idx[], const int n, const int v)
   {
    for(int i = 0; i < n; i++)
@@ -2565,14 +2618,14 @@ bool IdxHas(const int &idx[], const int n, const int v)
   }
 
 //+------------------------------------------------------------------+
+//| Zona per arah, terdekat ke harga dulu, maks MaxGroupsPerSide.    |
+//| Pending lama yang bukan slot terdekat dihapus di CancelStale.    |
+//+------------------------------------------------------------------+
 void CollectNearestZones(const bool wantBuy, const double bid, const double u,
-                         int &idx[], int &nOut, double &keepCl[], int &nKeep,
-                         const LiveItem &items[])
+                         int &idx[], int &nOut)
   {
-   nOut  = 0;
-   nKeep = 0;
+   nOut = 0;
    ArrayResize(idx, 0);
-   ArrayResize(keepCl, 0);
    int    zIdx[];
    double dist[];
    double zCl[];
@@ -2614,184 +2667,48 @@ void CollectNearestZones(const bool wantBuy, const double bid, const double u,
       zTp[nCand - 1]  = tp;
      }
 
-   double oldCl[];
-   double oldTp[];
-   int    nOld = 0;
-   CollectPacSideRanges(wantBuy, oldCl, oldTp, nOld, items);
-
-   bool skip[];
-   ArrayResize(skip, nCand);
-   const double epsW = MathMax(_Point * 5.0, PipSize() * 0.05);
-   for(int i = 0; i < nCand; i++)
-     {
-      skip[i] = false;
-      for(int j = 0; j < nCand; j++)
-        {
-         if(i == j)
-            continue;
-         if(!TpClOverlap(zCl[i], zTp[i], zCl[j], zTp[j]))
-            continue;
-         const double wI = MathAbs(zCl[i] - zTp[i]);
-         const double wJ = MathAbs(zCl[j] - zTp[j]);
-         if(wI < wJ - epsW)
-           {
-            skip[i] = true;
-            break;
-           }
-         if(MathAbs(wI - wJ) <= epsW && dist[i] < dist[j])
-           {
-            skip[i] = true;
-            break;
-           }
-        }
-      if(skip[i])
-         continue;
-      for(int o = 0; o < nOld; o++)
-        {
-         if(TpClOverlap(zCl[i], zTp[i], oldCl[o], oldTp[o]))
-           {
-            skip[i] = true;
-            break;
-           }
-        }
-     }
-
-   int    fIdx[];
-   double fDist[];
-   double fCl[];
-   int    nF = 0;
-   for(int i = 0; i < nCand; i++)
-     {
-      if(skip[i])
-         continue;
-      nF++;
-      ArrayResize(fIdx, nF);
-      ArrayResize(fDist, nF);
-      ArrayResize(fCl, nF);
-      fIdx[nF - 1]  = zIdx[i];
-      fDist[nF - 1] = dist[i];
-      fCl[nF - 1]   = zCl[i];
-     }
-
-   for(int i = 1; i < nF; i++)
+   for(int i = 1; i < nCand; i++)
      {
       for(int j = i; j > 0; j--)
         {
-         if(fDist[j] >= fDist[j - 1])
+         if(dist[j] >= dist[j - 1])
             break;
-         const int    ti = fIdx[j];
-         const double td = fDist[j];
-         const double tc = fCl[j];
-         fIdx[j]      = fIdx[j - 1];
-         fDist[j]     = fDist[j - 1];
-         fCl[j]       = fCl[j - 1];
-         fIdx[j - 1]  = ti;
-         fDist[j - 1] = td;
-         fCl[j - 1]   = tc;
+         const int    ti = zIdx[j];
+         const double td = dist[j];
+         const double tc = zCl[j];
+         const double tt = zTp[j];
+         zIdx[j]      = zIdx[j - 1];
+         dist[j]      = dist[j - 1];
+         zCl[j]       = zCl[j - 1];
+         zTp[j]       = zTp[j - 1];
+         zIdx[j - 1]  = ti;
+         dist[j - 1]  = td;
+         zCl[j - 1]   = tc;
+         zTp[j - 1]   = tt;
         }
-     }
-
-   double pCl[];
-   double pDist[];
-   int    nProt = 0;
-   for(int o = 0; o < nOld; o++)
-     {
-      bool already = false;
-      for(int i = 0; i < nF; i++)
-        {
-         if(SameCl(fCl[i], oldCl[o]))
-           {
-            already = true;
-            break;
-           }
-        }
-      if(already)
-         continue;
-      bool protects = false;
-      for(int i = 0; i < nCand; i++)
-        {
-         if(!skip[i])
-            continue;
-         if(TpClOverlap(zCl[i], zTp[i], oldCl[o], oldTp[o]))
-           {
-            protects = true;
-            break;
-           }
-        }
-      if(!protects)
-         continue;
-      double d = 0.0;
-      if(wantBuy)
-         d = bid - oldCl[o];
-      else
-         d = oldCl[o] - bid;
-      if(d < 0.0)
-         d = 0.0;
-      nProt++;
-      ArrayResize(pCl, nProt);
-      ArrayResize(pDist, nProt);
-      pCl[nProt - 1]   = oldCl[o];
-      pDist[nProt - 1] = d;
      }
 
    const int cap = MaxGroupsPerSide();
-   const int nMerge = nF + nProt;
-   bool takeNew[];
-   int  takePi[];
-   double takeDist[];
-   ArrayResize(takeNew, nMerge);
-   ArrayResize(takePi, nMerge);
-   ArrayResize(takeDist, nMerge);
-   for(int i = 0; i < nF; i++)
+   for(int i = 0; i < nCand && nOut < cap; i++)
      {
-      takeNew[i]  = true;
-      takePi[i]   = i;
-      takeDist[i] = fDist[i];
-     }
-   for(int i = 0; i < nProt; i++)
-     {
-      const int k = nF + i;
-      takeNew[k]  = false;
-      takePi[k]   = i;
-      takeDist[k] = pDist[i];
-     }
-   for(int i = 1; i < nMerge; i++)
-     {
-      for(int j = i; j > 0; j--)
+      bool overlap = false;
+      for(int k = 0; k < nOut; k++)
         {
-         if(takeDist[j] >= takeDist[j - 1])
+         const int pk = idx[k];
+         double pCl = 0.0;
+         double pTp = 0.0;
+         ZoneClTp(g_zones[pk], u, pCl, pTp);
+         if(TpClOverlap(zCl[i], zTp[i], pCl, pTp))
+           {
+            overlap = true;
             break;
-         const bool   tn = takeNew[j];
-         const int    tp = takePi[j];
-         const double td = takeDist[j];
-         takeNew[j]      = takeNew[j - 1];
-         takePi[j]       = takePi[j - 1];
-         takeDist[j]     = takeDist[j - 1];
-         takeNew[j - 1]  = tn;
-         takePi[j - 1]   = tp;
-         takeDist[j - 1] = td;
+           }
         }
-     }
-
-   nOut  = 0;
-   nKeep = 0;
-   ArrayResize(idx, 0);
-   ArrayResize(keepCl, 0);
-   const int takeN = (nMerge > cap ? cap : nMerge);
-   for(int i = 0; i < takeN; i++)
-     {
-      if(takeNew[i])
-        {
-         nOut++;
-         ArrayResize(idx, nOut);
-         idx[nOut - 1] = fIdx[takePi[i]];
-        }
-      else
-        {
-         nKeep++;
-         ArrayResize(keepCl, nKeep);
-         keepCl[nKeep - 1] = pCl[takePi[i]];
-        }
+      if(overlap)
+         continue;
+      nOut++;
+      ArrayResize(idx, nOut);
+      idx[nOut - 1] = zIdx[i];
      }
   }
 
@@ -2848,18 +2765,22 @@ void DrawSellLevels(const double atap, const double tp, const double u, const st
 
    if(drawTp)
       CreateLevelLine(PREFIX_LV + "TP_S", tp, clrGold,
-                      StringFormat("PAC TP Sell (%s)\n%s", kind, DoubleToString(tp, _Digits)));
+                      StringFormat("PAC TP Sell (%s)\n%s", kind, DoubleToString(tp, _Digits)),
+                      "TP Mandiri");
    CreateLevelLine(PREFIX_LV + "CL_S", cl, clrOrange,
-                   StringFormat("PAC CL Sell\n%s", DoubleToString(cl, _Digits)), STYLE_DASH);
+                   StringFormat("PAC CL Sell\n%s", DoubleToString(cl, _Digits)),
+                   "CL", STYLE_DASH);
    CreateLevelLine(PREFIX_LV + "SL_S", sl, clrSilver,
-                   StringFormat("PAC SL Sell\n%s", DoubleToString(sl, _Digits)), STYLE_DOT);
+                   StringFormat("PAC SL Sell\n%s", DoubleToString(sl, _Digits)),
+                   "SL", STYLE_DOT);
 
    for(int i = 1; i <= n; i++)
      {
       const double entry = entry1 + (atap - entry1) * (double)(i - 1) / (double)n;
+      const string elabel = (n <= 1) ? "Entry" : ("Entry " + IntegerToString(i));
       CreateLevelLine(PREFIX_LV + "ES" + IntegerToString(i), entry, InpResistColor,
                       StringFormat("PAC Entry Sell %d/%d\n%s", i, n, DoubleToString(entry, _Digits)),
-                      STYLE_DASH, 1);
+                      elabel, STYLE_DASH, 1);
      }
   }
 
@@ -2874,18 +2795,22 @@ void DrawBuyLevels(const double lantai, const double tp, const double u, const s
 
    if(drawTp)
       CreateLevelLine(PREFIX_LV + "TP_B", tp, clrGold,
-                      StringFormat("PAC TP Buy (%s)\n%s", kind, DoubleToString(tp, _Digits)));
+                      StringFormat("PAC TP Buy (%s)\n%s", kind, DoubleToString(tp, _Digits)),
+                      "TP Mandiri");
    CreateLevelLine(PREFIX_LV + "CL_B", cl, clrOrange,
-                   StringFormat("PAC CL Buy\n%s", DoubleToString(cl, _Digits)), STYLE_DASH);
+                   StringFormat("PAC CL Buy\n%s", DoubleToString(cl, _Digits)),
+                   "CL", STYLE_DASH);
    CreateLevelLine(PREFIX_LV + "SL_B", sl, clrSilver,
-                   StringFormat("PAC SL Buy\n%s", DoubleToString(sl, _Digits)), STYLE_DOT);
+                   StringFormat("PAC SL Buy\n%s", DoubleToString(sl, _Digits)),
+                   "SL", STYLE_DOT);
 
    for(int i = 1; i <= n; i++)
      {
       const double entry = entry1 + (lantai - entry1) * (double)(i - 1) / (double)n;
+      const string elabel = (n <= 1) ? "Entry" : ("Entry " + IntegerToString(i));
       CreateLevelLine(PREFIX_LV + "EB" + IntegerToString(i), entry, InpSupportColor,
                       StringFormat("PAC Entry Buy %d/%d\n%s", i, n, DoubleToString(entry, _Digits)),
-                      STYLE_DASH, 1);
+                      elabel, STYLE_DASH, 1);
      }
   }
 
@@ -2943,8 +2868,7 @@ void DrawAtapLantai()
    const double atap   = hasAtap   ? g_zones[atapIdx].high : 0.0;
    const double lantai = hasLantai ? g_zones[lantaiIdx].low : 0.0;
    const double u          = ComputeU();
-   const double crossThresh = 2.0 * UTpDist(u);
-   const bool paired   = (hasAtap && hasLantai && (atap - lantai) <= crossThresh && atap > lantai);
+   const bool paired = (hasAtap && hasLantai && AutoPairZones(atap, lantai, u));
 
    if(draw)
      {
@@ -2956,7 +2880,8 @@ void DrawAtapLantai()
                          StringFormat("PAC Atap (Pivot Sell ke-%d)\n%s\nH=%s",
                                       rk,
                                       TimeToString(z.left, TIME_DATE | TIME_MINUTES),
-                                      DoubleToString(z.high, _Digits)));
+                                      DoubleToString(z.high, _Digits)),
+                         "Atap");
         }
       if(hasLantai)
         {
@@ -2966,14 +2891,16 @@ void DrawAtapLantai()
                          StringFormat("PAC Lantai (Pivot Buy ke-%d)\n%s\nL=%s",
                                       rk,
                                       TimeToString(z.left, TIME_DATE | TIME_MINUTES),
-                                      DoubleToString(z.low, _Digits)));
+                                      DoubleToString(z.low, _Digits)),
+                         "Lantai");
         }
 
       if(paired)
         {
          const double tp = (atap + lantai) * 0.5;
          CreateLevelLine(PREFIX_LV + "TP", tp, clrGold,
-                         StringFormat("PAC TP (Paired)\n%s", DoubleToString(tp, _Digits)));
+                         StringFormat("PAC TP (Paired)\n%s", DoubleToString(tp, _Digits)),
+                         "TP Pasangan");
          DrawSellLevels(atap, tp, u, "Paired", false);
          DrawBuyLevels(lantai, tp, u, "Paired", false);
         }
@@ -3262,7 +3189,7 @@ void CancelStalePendings(const double &liveCl[], const bool &liveBuy[], const in
       const string cmt = OrderGetString(ORDER_COMMENT);
       if(g_trade.OrderDelete(ticket) && TradeOk())
         {
-         Print("PAC geser: hapus pending grup jauh ", cmt);
+         if(ChartVisualsOn()) Print("PAC geser: hapus pending grup jauh ", cmt);
          DropTpBatchesForGroup(p.groupCode);
         }
      }
@@ -3306,16 +3233,10 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
    const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(bid <= 0.0)
       return;
-   LiveItem items[];
-   CollectItems(items);
    const double u   = ComputeU();
    const double buf = UClDist(u);
-   double keepB[];
-   double keepS[];
-   int nkb = 0;
-   int nks = 0;
-   CollectNearestZones(true, bid, u, buyIdx, nBuy, keepB, nkb, items);
-   CollectNearestZones(false, bid, u, sellIdx, nSell, keepS, nks, items);
+   CollectNearestZones(true, bid, u, buyIdx, nBuy);
+   CollectNearestZones(false, bid, u, sellIdx, nSell);
    for(int i = 0; i < nBuy; i++)
      {
       const double cl = NormalizePrice(g_zones[buyIdx[i]].low - buf);
@@ -3325,25 +3246,6 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
       liveCl[nLive - 1]  = cl;
       liveBuy[nLive - 1] = true;
      }
-   for(int i = 0; i < nkb; i++)
-     {
-      bool dup = false;
-      for(int k = 0; k < nLive; k++)
-        {
-         if(liveBuy[k] && SameCl(liveCl[k], keepB[i]))
-           {
-            dup = true;
-            break;
-           }
-        }
-      if(dup)
-         continue;
-      nLive++;
-      ArrayResize(liveCl, nLive);
-      ArrayResize(liveBuy, nLive);
-      liveCl[nLive - 1]  = keepB[i];
-      liveBuy[nLive - 1] = true;
-     }
    for(int i = 0; i < nSell; i++)
      {
       const double cl = NormalizePrice(g_zones[sellIdx[i]].high + buf);
@@ -3351,25 +3253,6 @@ void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
       ArrayResize(liveCl, nLive);
       ArrayResize(liveBuy, nLive);
       liveCl[nLive - 1]  = cl;
-      liveBuy[nLive - 1] = false;
-     }
-   for(int i = 0; i < nks; i++)
-     {
-      bool dup = false;
-      for(int k = 0; k < nLive; k++)
-        {
-         if(!liveBuy[k] && SameCl(liveCl[k], keepS[i]))
-           {
-            dup = true;
-            break;
-           }
-        }
-      if(dup)
-         continue;
-      nLive++;
-      ArrayResize(liveCl, nLive);
-      ArrayResize(liveBuy, nLive);
-      liveCl[nLive - 1]  = keepS[i];
       liveBuy[nLive - 1] = false;
      }
   }
@@ -3420,7 +3303,7 @@ bool PlacePending(const bool isBuy, const double lot, const double price,
       ok = g_trade.SellStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
    if(ok && TradeOk())
       return(true);
-   Print("PAC order gagal: ", comment, " ret=", g_trade.ResultRetcode(),
+   if(ChartVisualsOn()) Print("PAC order gagal: ", comment, " ret=", g_trade.ResultRetcode(),
          " ", g_trade.ResultRetcodeDescription());
    return(false);
   }
@@ -3445,20 +3328,16 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
          continue;
       double entry = entry1 + (extreme - entry1) * (double)(i - 1) / (double)n;
       entry = NormalizePrice(entry);
+      if((isBuy && tpN <= entry) || (!isBuy && tpN >= entry))
+         continue;
       const string cmt = MakeComment(paired, isBuy, n, i, cl, ts);
       const double lot = LayerLot(i);
       if(PlacePending(isBuy, lot, entry, sl, tpN, cmt))
-         Print("PAC pending: ", cmt, " @ ", DoubleToString(entry, _Digits),
+         if(ChartVisualsOn()) Print("PAC pending: ", cmt, " @ ", DoubleToString(entry, _Digits),
                " lot ", DoubleToString(lot, 2));
      }
   }
 
-//+------------------------------------------------------------------+
-//| Cari extreme (high/low) zona lawan terdekat dari daftar slot     |
-//| aktif+kandidat, buat cegah TP mandiri crossing kalau ternyata    |
-//| ada zona lawan yg jaraknya lebih dekat dari 2x Anchor->TP. Return |
-//| 0 kalau tidak ada. buf pakai U saat ini (perkiraan, lihat catatan|
-//| di ComputeU soal kapan U "terkunci").                            |
 //+------------------------------------------------------------------+
 double NearestOppositeExtreme(const bool isBuy, const double extreme, const double u,
                               const double &liveCl[], const bool &liveBuy[], const int nLive)
@@ -3494,22 +3373,19 @@ double NearestOppositeExtreme(const bool isBuy, const double extreme, const doub
   }
 
 //+------------------------------------------------------------------+
-//| TP mandiri (Anchor +/- Anchor->TP), tapi di-clamp ke titik tengah|
-//| kalau ada zona lawan lebih dekat dari 2x Anchor->TP supaya TP dua|
-//| sisi tidak saling menyeberang (crossing).                        |
-//+------------------------------------------------------------------+
 double IndependentTp(const bool isBuy, const double extreme, const double u,
                      const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
-   double tp = MandiriTp(isBuy, extreme, u);
+   const double mandiri = MandiriTp(isBuy, extreme, u);
+   if(!InpAutoPasangan)
+      return(mandiri);
    const double oppExtreme = NearestOppositeExtreme(isBuy, extreme, u, liveCl, liveBuy, nLive);
    if(oppExtreme <= 0.0)
-      return(tp);
+      return(mandiri);
    const double gap = isBuy ? (oppExtreme - extreme) : (extreme - oppExtreme);
-   const double crossThresh = 2.0 * UTpDist(u);
-   if(gap < crossThresh)
-      tp = (extreme + oppExtreme) * 0.5;
-   return(tp);
+   if(!GapAllowsPasangan(gap, u))
+      return(mandiri);
+   return((extreme + oppExtreme) * 0.5);
   }
 
 //+------------------------------------------------------------------+
@@ -3897,12 +3773,12 @@ void FlattenGroup(PacGroup &g)
       if(items[i].isPosition)
         {
          if(!g_trade.PositionClose(items[i].ticket) || !TradeOk())
-            Print("PAC CLCC gagal tutup posisi #", items[i].ticket, " grup ", g.groupCode);
+            if(ChartVisualsOn()) Print("PAC CLCC gagal tutup posisi #", items[i].ticket, " grup ", g.groupCode);
         }
       else
         {
          if(!g_trade.OrderDelete(items[i].ticket) || !TradeOk())
-            Print("PAC CLCC gagal hapus pending #", items[i].ticket, " grup ", g.groupCode);
+            if(ChartVisualsOn()) Print("PAC CLCC gagal hapus pending #", items[i].ticket, " grup ", g.groupCode);
         }
      }
   }
@@ -3928,7 +3804,7 @@ void ExecuteClcc(PacGroup &g)
    ApplyClccToZones();
    const string msg = "PAC CLCC " + _Symbol + " " + (g.direction > 0 ? "Buy " : "Sell ") + g.groupCode +
                       " — pending dihapus, tidak reentry";
-   Print(msg);
+   if(ChartVisualsOn()) Print(msg);
    if(InpAlertOnCL)
       Alert(msg);
    g_clccGroup = "";
@@ -3965,7 +3841,7 @@ void InitClccBarState(PacGroup &g)
             continue;
          if(IsClBreak(g, cl))
            {
-            Print("PAC CLCC catch-up ", g.groupCode, " close[", i, "]=", DoubleToString(cl, _Digits));
+            if(ChartVisualsOn()) Print("PAC CLCC catch-up ", g.groupCode, " close[", i, "]=", DoubleToString(cl, _Digits));
             g.lastCheckedBarTime = currentBar;
             ExecuteClcc(g);
             return;
@@ -4089,7 +3965,7 @@ void CheckAllClcc()
             continue;
          if(IsClBreak(g_groups[i], cl))
            {
-            Print("PAC CLCC ", g_groups[i].groupCode,
+            if(ChartVisualsOn()) Print("PAC CLCC ", g_groups[i].groupCode,
                   " TF=", g_groups[i].tfText,
                   " close=", DoubleToString(cl, _Digits),
                   " CL=", DoubleToString(g_groups[i].clPrice, _Digits));
@@ -4115,18 +3991,20 @@ void DeletePendingInGroup(PacGroup &g, const string tag)
       if(items[i].isPosition || !ItemMatchesGroup(items[i], g))
          continue;
       if(!g_trade.OrderDelete(items[i].ticket) || !TradeOk())
-         Print("PAC ", tag, " gagal hapus #", items[i].ticket);
+        {
+         if(ChartVisualsOn()) Print("PAC ", tag, " gagal hapus #", items[i].ticket);
+        }
       else
         {
          deleted++;
-         Print("PAC ", tag, " hapus pending ", items[i].comment);
+         if(ChartVisualsOn()) Print("PAC ", tag, " hapus pending ", items[i].comment);
         }
      }
    if(deleted <= 0)
       return;
    const string msg = "PAC " + tag + " " + _Symbol + " " + g.groupCode +
                       " (" + IntegerToString(deleted) + " pending dihapus)";
-   Print(msg);
+   if(ChartVisualsOn()) Print(msg);
    if(tag == "MaxReentry" && InpAlertOnReentry)
       Alert(msg);
   }
@@ -4175,9 +4053,7 @@ void RemoveTpBatchAt(const int index)
 //| Anchor dicari lagi dari g_zones lewat clPrice yg tersimpan di     |
 //| slot -- zona itu sendiri (high/low mentah) tidak pernah berubah   |
 //| terlepas dari U, jadi aman dipakai sebagai referensi permanen.    |
-//| Paired/mandiri dihitung ulang fresh via IndependentTp (kalau      |
-//| ternyata masih nyilang dgn sisi lawan, otomatis di-clamp sama     |
-//| seperti entry baru biasa).                                       |
+//| TP: mandiri, atau Auto Pasangan jika jarak Atap-Lantai lolos.     |
 //+------------------------------------------------------------------+
 bool PlaceReentry(const TpSlot &slot, const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
@@ -4190,14 +4066,19 @@ bool PlaceReentry(const TpSlot &slot, const double &liveCl[], const bool &liveBu
    CalcEntryClSl(slot.isBuy, anchor, u, entry1, cl, sl);
    if(HasPacLayer(slot.isBuy, cl, slot.position))
       return(true);
+   const double mandiri = MandiriTp(slot.isBuy, anchor, u);
    const double tp = IndependentTp(slot.isBuy, anchor, u, liveCl, liveBuy, nLive);
    const int n = MathMax(slot.layerCount, 1);
    const double entry = NormalizePrice(entry1 + (anchor - entry1) * (double)(slot.position - 1) / (double)n);
+   const double tpN = NormalizePrice(tp);
+   if((slot.isBuy && tpN <= entry) || (!slot.isBuy && tpN >= entry))
+      return(false);
+   const bool paired = (MathAbs(tp - mandiri) > _Point);
    const double lot = LayerLot(slot.position);
-   const string cmt = MakeComment(false, slot.isBuy, slot.layerCount, slot.position, cl, slot.stamp);
-   if(PlacePending(slot.isBuy, lot, entry, sl, NormalizePrice(tp), cmt))
+   const string cmt = MakeComment(paired, slot.isBuy, slot.layerCount, slot.position, cl, slot.stamp);
+   if(PlacePending(slot.isBuy, lot, entry, sl, tpN, cmt))
      {
-      Print("PAC reentry: ", cmt, " @ ", DoubleToString(entry, _Digits));
+      if(ChartVisualsOn()) Print("PAC reentry: ", cmt, " @ ", DoubleToString(entry, _Digits));
       return(true);
      }
    return(false);
@@ -4229,7 +4110,7 @@ void ProcessTpBatches()
 
       if(GroupPivotCapReached(g_groups[gi]))
         {
-         Print("PAC pivot cap ", code, " — tidak reentry");
+         if(ChartVisualsOn()) Print("PAC pivot cap ", code, " — tidak reentry");
          DeletePendingInGroup(g_groups[gi], "pivot cap");
          RemoveTpBatchAt(i);
          continue;
@@ -4271,7 +4152,7 @@ void ProcessTpBatches()
          const string msg = "PAC Reentry " + _Symbol + " " + code + " " +
                             IntegerToString(g_groups[gi].reentryCount) + "/" +
                             IntegerToString(InpMaxReentry);
-         Print(msg);
+         if(ChartVisualsOn()) Print(msg);
          if(InpAlertOnReentry)
             Alert(msg);
         }
@@ -4287,7 +4168,7 @@ void ApplyNewsFilter()
      {
       if(newsName != g_lastNewsName)
         {
-         Print("PAC news filter: ", newsName, " — tutup posisi & hapus pending");
+         if(ChartVisualsOn()) Print("PAC news filter: ", newsName, " — tutup posisi & hapus pending");
          g_lastNewsName = newsName;
         }
       FlattenNewsExposure();
@@ -4313,7 +4194,7 @@ void ApplyHourFilter()
             actionText = "Tutup Semua";
          else if(InpHourFilter == HOUR_CANCEL_PENDING)
             actionText = "Hanya Pending";
-         Print("PAC hour filter: ", hourLabel, " — ", actionText);
+         if(ChartVisualsOn()) Print("PAC hour filter: ", hourLabel, " — ", actionText);
          g_lastHourFilterLabel = hourLabel;
         }
       if(InpHourFilter == HOUR_FLATTEN_ALL)
@@ -4359,7 +4240,7 @@ void ApplyPivotCapAndSlots()
          continue;
       if(!GroupPivotCapReached(g_groups[i]))
          continue;
-      Print("PAC pivot cap ", g_groups[i].groupCode, " — hapus pending, tidak reentry");
+      if(ChartVisualsOn()) Print("PAC pivot cap ", g_groups[i].groupCode, " — hapus pending, tidak reentry");
       DeletePendingInGroup(g_groups[i], "pivot cap");
       DropTpBatchesForGroup(g_groups[i].groupCode);
      }
@@ -4525,7 +4406,7 @@ void HandleTradeTransaction(const MqlTradeTransaction &trans)
       reason == DEAL_REASON_CLIENT ||
       reason == DEAL_REASON_MOBILE)
      {
-      Print("PAC slot berhenti reentry: ", snap.comment, " reason=", reason);
+      if(ChartVisualsOn()) Print("PAC slot berhenti reentry: ", snap.comment, " reason=", reason);
       return;
      }
   }
