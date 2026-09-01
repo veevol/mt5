@@ -4,7 +4,7 @@
 //|  Reentry setelah TP. CLCC close candle, bukan SL sentuh.         |
 //+------------------------------------------------------------------+
 #property copyright "PAC Auto Entry"
-#property version   "1.01"
+#property version   "1.06"
 #property description "PAC Auto Entry — Pivot, Base, Control, pending, CLCC, reentry"
 
 #include <Trade/Trade.mqh>
@@ -145,9 +145,11 @@ const string PREFIX_ATAP   = "PAC_ATAP";
 const string PREFIX_LANTAI = "PAC_LANTAI";
 const string PREFIX_LV     = "PAC_LV_";
 const string PREFIX_NEWS   = "PAC_NEWS_";
-const color  NEWS_CLR      = clrMediumOrchid;   // ungu - garis & label filter berita
+const color  NEWS_CLR      = clrMediumOrchid;    // ungu - jendela news hidup/akan datang
+const color  NEWS_CLR_PAST = clrPurple;          // ungu tua - jendela news sudah lewat
 const string PREFIX_HOUR   = "PAC_HOUR_";
-const color  HOUR_CLR      = clrDeepSkyBlue;    // biru muda - garis & label filter jam
+const color  HOUR_CLR      = clrDeepSkyBlue;    // biru muda - jendela jam hidup/akan datang
+const color  HOUR_CLR_PAST = clrSteelBlue;      // biru baja - jendela jam sudah lewat
 const double BASE_BODY_RATIO  = 0.5; // |Close-Open| â‰¤ rasio Ã— (High-Low)
 const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low)
 const long   InpMagic         = 999; // Magic Number EA PAC (bukan 0)
@@ -224,6 +226,7 @@ struct PacGroup
    string          groupCode;
    ENUM_TIMEFRAMES timeframe;
    double          clPrice;
+   double          anchor;    // lantai/atap, kunci zona (tidak ikut ATR)
    string          tfText;
    int             layerCount;
    int             direction;
@@ -250,7 +253,8 @@ struct TpSlot
    bool            isBuy;
    int             layerCount;
    int             position;
-   double          clPrice;   // dipakai cari anchor via FindZoneIndexForCl saat reentry dikirim
+   double          clPrice;   // CL terkunci saat TP, untuk CLCC/reentry
+   double          anchor;    // lantai/atap zona, kunci identitas
    string          stamp;
   };
 
@@ -259,6 +263,28 @@ struct TpBatch
    string groupCode;
    ulong  windowStartMs;
    TpSlot slots[];
+  };
+
+struct VizGroup
+  {
+   string   code;
+   bool     isBuy;
+   int      rank;
+   double   anchor;
+   double   entry;
+   double   cl;
+   double   sl;
+   double   tp;
+   datetime tFrom;
+   bool     hasPos1;
+  };
+
+struct LivePosSlot
+  {
+   double anchor;
+   double cl;
+   double entry;
+   int    zoneIdx;
   };
 
 //+------------------------------------------------------------------+
@@ -273,10 +299,15 @@ CTrade           g_trade;
 PacGroup         g_groups[];
 Snapshot         g_snaps[];
 TpBatch          g_tpBatches[];
+VizGroup         g_viz[];
+int              g_vizAtapIdx   = -1;
+int              g_vizLantaiIdx = -1;
+bool             g_vizPaired    = false;
+double           g_vizU         = 0.0;
 ulong            g_processedDeals[];
 bool             g_inRefresh = false;
 string           g_clccGroup = "";
-double           g_clccCl[];
+double           g_clccCl[];   // lantai/atap zona yang sudah CLCC
 bool             g_clccBuy[];
 string           g_lastNewsName = "";
 string           g_lastHourFilterLabel = "";
@@ -1301,6 +1332,14 @@ void CreateNewsVLine(const string name, const datetime t, const color clr,
   }
 
 //+------------------------------------------------------------------+
+color FilterMarkColor(const color liveClr, const color pastClr, const datetime tOff)
+  {
+   if(tOff > 0 && tOff < TimeCurrent())
+      return(pastClr);
+   return(liveClr);
+  }
+
+//+------------------------------------------------------------------+
 double NewsLabelPrice(const datetime t)
   {
    if(t > 0)
@@ -1366,11 +1405,12 @@ void DrawNewsMarks()
       const datetime tOn  = UtcToHfmChart(utc - before);
       const datetime tOff = UtcToHfmChart(utc + after);
       const string id = IntegerToString(i);
-      CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, NEWS_CLR, STYLE_DASH,
+      const color clr = FilterMarkColor(NEWS_CLR, NEWS_CLR_PAST, tOff);
+      CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, clr, STYLE_DASH,
                       major + " | jendela aktif");
-      CreateNewsVLine(PREFIX_NEWS + "OFF_" + id, tOff, NEWS_CLR, STYLE_DOT,
+      CreateNewsVLine(PREFIX_NEWS + "OFF_" + id, tOff, clr, STYLE_DOT,
                       major + " | jendela inaktif");
-      CreateNewsLabel(PREFIX_NEWS + "LB_" + id, tOn, major, NEWS_CLR);
+      CreateNewsLabel(PREFIX_NEWS + "LB_" + id, tOn, major, clr);
      }
   }
 
@@ -1412,11 +1452,12 @@ void DrawHourMarks()
          const datetime tOnServer  = WibToServer(tOnWib);
          const datetime tOffServer = WibToServer(tOffWib);
          const string id = IntegerToString(idx++);
-         CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, HOUR_CLR, STYLE_DASH,
+         const color clr = FilterMarkColor(HOUR_CLR, HOUR_CLR_PAST, tOffServer);
+         CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, clr, STYLE_DASH,
                          g_hourWindows[w].label + " | jendela jam mulai");
-         CreateNewsVLine(PREFIX_HOUR + "OFF_" + id, tOffServer, HOUR_CLR, STYLE_DOT,
+         CreateNewsVLine(PREFIX_HOUR + "OFF_" + id, tOffServer, clr, STYLE_DOT,
                          g_hourWindows[w].label + " | jendela jam berakhir");
-         CreateNewsLabel(PREFIX_HOUR + "LB_" + id, tOnServer, g_hourWindows[w].label, HOUR_CLR);
+         CreateNewsLabel(PREFIX_HOUR + "LB_" + id, tOnServer, g_hourWindows[w].label, clr);
         }
      }
   }
@@ -1547,8 +1588,6 @@ int OnInit()
 
    g_usedTF = DetectionTF();
    ScanAndDraw();
-   DrawNewsMarks();
-   DrawHourMarks();
    g_lastBarTime = iTime(_Symbol, g_usedTF, 0);
    ManageOrders();
    if(ChartVisualsOn())
@@ -1636,10 +1675,10 @@ void ScanAndDraw()
    ApplyTpAdaptive();
    DrawPivots();
    DrawBases();
-   DrawSrZones();
    DrawAtapLantai();
-   if(ChartVisualsOn())
-      ChartRedraw(0);
+   RefreshChartVisuals();
+   DrawNewsMarks();
+   DrawHourMarks();
   }
 
 //+------------------------------------------------------------------+
@@ -1695,12 +1734,9 @@ double PipSize()
   }
 
 //+------------------------------------------------------------------+
-//| U = jarak Anchor->Entry, dihitung fresh tiap dipanggil. "Terkunci"|
-//| secara alami begitu suatu pending benar-benar dikirim, karena     |
-//| entry/CL/SL/TP hasil hitungan saat itu langsung dibakar ke field  |
-//| order (harga, SL, TP) & comment (clPrice) -- tidak ada kode yang  |
-//| menghitung ulang nilai itu utk order yang sudah ada. Reentry yang |
-//| mengirim pending BARU otomatis dapat U baru krn manggil ini lagi. |
+//| U = jarak Anchor->Entry, dihitung fresh tiap dipanggil. Grup yang |
+//| sudah berpending/posisi dikunci ke lantai/atap: ATR baru tidak   |
+//| boleh menghapus-pasang ulang. Reentry setelah TP boleh U baru.  |
 //+------------------------------------------------------------------+
 double ComputeU()
   {
@@ -2294,21 +2330,27 @@ void CreateSrRect(const SrZone &z)
       return; // zona kadaluarsa disembunyikan di mode chart ringan
    const string name = (z.isSupport ? PREFIX_SUP : PREFIX_RES) + IntegerToString((long)z.left);
    const string side = z.isSupport ? "Lantai" : "Atap";
+   const int armedRank = ArmedRankForZone(z);
+   const bool armed = (armedRank > 0);
+   const color zclr = armed ? GroupColor(z.isSupport, armedRank)
+                            : (z.isSupport ? InpSupportColor : InpResistColor);
 
    if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, z.left, z.high, z.right, z.low))
       return;
 
-   ObjectSetInteger(0, name, OBJPROP_COLOR, z.isSupport ? InpSupportColor : InpResistColor);
-   ObjectSetInteger(0, name, OBJPROP_STYLE, aktif ? STYLE_SOLID : (off ? STYLE_DOT : STYLE_DASH));
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, aktif ? 2 : 1);
-   ObjectSetInteger(0, name, OBJPROP_FILL, aktif);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, zclr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, (armed || aktif) ? STYLE_SOLID : (off ? STYLE_DOT : STYLE_DASH));
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, armed ? 2 : (aktif ? 1 : 1));
+   ObjectSetInteger(0, name, OBJPROP_FILL, armed);
    ObjectSetInteger(0, name, OBJPROP_BACK, true);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
 
    string tip = "PAC Control Standby " + side;
-   if(aktif)
+   if(armed)
+      tip = StringFormat("PAC Grup %s%d %s", z.isSupport ? "B" : "S", armedRank, side);
+   else if(aktif)
       tip = "PAC Control Aktif " + side;
    else if(off)
       tip = "PAC Control Off " + side;
@@ -2369,6 +2411,85 @@ void CreateLevelLine(const string name, const double price, const color clr, con
   }
 
 //+------------------------------------------------------------------+
+color GroupColor(const bool isBuy, const int rank)
+  {
+   if(isBuy)
+     {
+      if(rank <= 1)
+         return(clrLime);
+      if(rank == 2)
+         return(InpSupportColor);
+      return(clrDarkGreen);
+     }
+   if(rank <= 1)
+      return(clrRed);
+   if(rank == 2)
+      return(clrDarkOrange);
+   return(clrMaroon);
+  }
+
+//+------------------------------------------------------------------+
+int ArmedRankForZone(const SrZone &z)
+  {
+   const double ext = z.isSupport ? z.low : z.high;
+   const int n = ArraySize(g_viz);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_viz[i].isBuy != z.isSupport)
+         continue;
+      if(g_viz[i].anchor > 0.0 && SameCl(g_viz[i].anchor, ext))
+         return(g_viz[i].rank);
+     }
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+void CreateLevelSeg(const string name, const double price, const datetime tFrom,
+                    const color clr, const string tip, const string label,
+                    const ENUM_LINE_STYLE style, const int width)
+  {
+   if(price <= 0.0)
+      return;
+   datetime t2 = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(t2 <= 0)
+      t2 = TimeCurrent();
+   datetime t1 = tFrom;
+   if(t1 <= 0)
+      t1 = t2 - (datetime)(PeriodSeconds() * 20);
+   if(t2 <= t1)
+      t2 = t1 + (datetime)PeriodSeconds();
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   if(label == "")
+      return;
+
+   datetime tLb = t2 + (datetime)PeriodSeconds();
+   const string lb = name + "_LB";
+   if(!ObjectCreate(0, lb, OBJ_TEXT, 0, tLb, price))
+      return;
+   ObjectSetString(0, lb, OBJPROP_TEXT, label);
+   ObjectSetString(0, lb, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, lb, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, lb, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, lb, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, lb, OBJPROP_BACK, false);
+   ObjectSetInteger(0, lb, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, lb, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, lb, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, lb, OBJPROP_TOOLTIP, tip);
+  }
+
+//+------------------------------------------------------------------+
 int PivotRank(const datetime t, const ENUM_PIVOT_TYPE type)
   {
    if(t <= 0)
@@ -2386,12 +2507,14 @@ int PivotRank(const datetime t, const ENUM_PIVOT_TYPE type)
   }
 
 //+------------------------------------------------------------------+
-bool WasClcc(const bool isBuy, const double cl)
+bool WasClcc(const bool isBuy, const double anchor)
   {
+   if(anchor <= 0.0)
+      return(false);
    const int n = ArraySize(g_clccCl);
    for(int i = 0; i < n; i++)
      {
-      if(g_clccBuy[i] == isBuy && SameCl(g_clccCl[i], cl))
+      if(g_clccBuy[i] == isBuy && SameCl(g_clccCl[i], anchor))
          return(true);
      }
    return(false);
@@ -2401,27 +2524,34 @@ bool WasClcc(const bool isBuy, const double cl)
 void RememberClcc(const PacGroup &g)
   {
    const bool isBuy = (g.direction > 0);
-   if(WasClcc(isBuy, g.clPrice))
+   double anchor = g.anchor;
+   if(anchor <= 0.0)
+     {
+      const int z = FindZoneIndexForFrozenCl(isBuy, g.clPrice);
+      if(z >= 0)
+         anchor = isBuy ? g_zones[z].low : g_zones[z].high;
+      else
+         anchor = isBuy ? (g.clPrice + UClDist(ComputeU()))
+                         : (g.clPrice - UClDist(ComputeU()));
+     }
+   if(WasClcc(isBuy, anchor))
       return;
    const int n = ArraySize(g_clccCl);
    ArrayResize(g_clccCl, n + 1);
    ArrayResize(g_clccBuy, n + 1);
-   g_clccCl[n]  = g.clPrice;
+   g_clccCl[n]  = NormalizePrice(anchor);
    g_clccBuy[n] = isBuy;
   }
 
 //+------------------------------------------------------------------+
 void ApplyClccToZones()
   {
-   const double buf = UClDist(ComputeU());
    const int n = ArraySize(g_zones);
    for(int i = 0; i < n; i++)
      {
       const bool isBuy = g_zones[i].isSupport;
-      const double cl = isBuy
-                        ? NormalizePrice(g_zones[i].low - buf)
-                        : NormalizePrice(g_zones[i].high + buf);
-      if(WasClcc(isBuy, cl))
+      const double anchor = isBuy ? g_zones[i].low : g_zones[i].high;
+      if(WasClcc(isBuy, anchor))
          g_zones[i].isWeak = true;
      }
   }
@@ -2434,11 +2564,8 @@ bool ZoneOrderEligible(const SrZone &z)
    if(z.pivotTouches >= MaxPivotTouches())
       return(false);
    const bool isBuy = z.isSupport;
-   const double buf = UClDist(ComputeU());
-   const double cl = isBuy
-                     ? NormalizePrice(z.low - buf)
-                     : NormalizePrice(z.high + buf);
-   return(!WasClcc(isBuy, cl));
+   const double anchor = isBuy ? z.low : z.high;
+   return(!WasClcc(isBuy, anchor));
   }
 
 //+------------------------------------------------------------------+
@@ -2479,6 +2606,27 @@ double TightestStandbyTp(const bool isBuy, const double entry, const double curT
         }
      }
    return(best);
+  }
+
+//+------------------------------------------------------------------+
+bool TpIsAdaptiveNow(const bool isBuy, const double entry, const double tp)
+  {
+   if(!InpTpAdaptive || entry <= 0.0 || tp <= 0.0)
+      return(false);
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_zones[i].isControl || g_zones[i].isWeak)
+         continue;
+      if(isBuy)
+        {
+         if(g_zones[i].low > entry && SameCl(g_zones[i].low, tp))
+            return(true);
+        }
+      else if(g_zones[i].high < entry && SameCl(g_zones[i].high, tp))
+         return(true);
+     }
+   return(false);
   }
 
 //+------------------------------------------------------------------+
@@ -2593,15 +2741,15 @@ void ZoneClTp(const SrZone &z, const double u, double &cl, double &tp)
   }
 
 //+------------------------------------------------------------------+
-bool TpClOverlap(const double clA, const double tpA,
-                 const double clB, const double tpB)
+bool ClEntryOverlap(const double clA, const double entryA,
+                    const double clB, const double entryB)
   {
-   if(clA <= 0.0 || tpA <= 0.0 || clB <= 0.0 || tpB <= 0.0)
+   if(clA <= 0.0 || entryA <= 0.0 || clB <= 0.0 || entryB <= 0.0)
       return(false);
-   const double loA = MathMin(clA, tpA);
-   const double hiA = MathMax(clA, tpA);
-   const double loB = MathMin(clB, tpB);
-   const double hiB = MathMax(clB, tpB);
+   const double loA = MathMin(clA, entryA);
+   const double hiA = MathMax(clA, entryA);
+   const double loB = MathMin(clB, entryB);
+   const double hiB = MathMax(clB, entryB);
    const double eps = MathMax(_Point * 5.0, PipSize() * 0.05);
    return(loA < hiB - eps && hiA > loB + eps);
   }
@@ -2618,18 +2766,85 @@ bool IdxHas(const int &idx[], const int n, const int v)
   }
 
 //+------------------------------------------------------------------+
+void CollectLivePositionSlots(const bool wantBuy, LivePosSlot &out[])
+  {
+   ArrayResize(out, 0);
+   const int np = PositionsTotal();
+   for(int i = 0; i < np; i++)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      PacCmt p;
+      if(!ParsePacCommentEx(PositionGetString(POSITION_COMMENT), p))
+         continue;
+      if(p.isBuy != wantBuy)
+         continue;
+      LivePosSlot s;
+      s.cl      = p.clPrice;
+      s.entry   = PositionGetDouble(POSITION_PRICE_OPEN);
+      s.zoneIdx = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                          PositionGetDouble(POSITION_SL),
+                                          s.entry, p.layerCount, p.position);
+      s.anchor  = (s.zoneIdx >= 0) ? ZoneExtreme(wantBuy, s.zoneIdx)
+                                   : ResolveOrderAnchor(p.isBuy, p.clPrice,
+                                                         PositionGetDouble(POSITION_SL),
+                                                         s.entry, p.layerCount, p.position);
+      const int n = ArraySize(out);
+      ArrayResize(out, n + 1);
+      out[n] = s;
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Zona per arah, terdekat ke harga dulu, maks MaxGroupsPerSide.    |
-//| Pending lama yang bukan slot terdekat dihapus di CancelStale.    |
+//| Posisi hidup mengunci slot dan masuk cek overlap Entry-CL.    |
+//| Slot berikutnya lolos jika Entry-nya tidak menyeberangi CL     |
+//| grup yang sudah diambil / posisi hidup (TP boleh irisan).      |
 //+------------------------------------------------------------------+
 void CollectNearestZones(const bool wantBuy, const double bid, const double u,
                          int &idx[], int &nOut)
   {
    nOut = 0;
    ArrayResize(idx, 0);
+   LivePosSlot live[];
+   CollectLivePositionSlots(wantBuy, live);
+   int used = 0;
+   const int nLive = ArraySize(live);
+   for(int i = 0; i < nLive; i++)
+     {
+      if(live[i].zoneIdx >= 0)
+        {
+         if(IdxHas(idx, nOut, live[i].zoneIdx))
+            continue;
+         nOut++;
+         ArrayResize(idx, nOut);
+         idx[nOut - 1] = live[i].zoneIdx;
+         used++;
+         continue;
+        }
+      bool dup = false;
+      for(int j = 0; j < i; j++)
+        {
+         if(live[j].anchor > 0.0 && live[i].anchor > 0.0 &&
+            SameCl(live[j].anchor, live[i].anchor))
+           {
+            dup = true;
+            break;
+           }
+        }
+      if(!dup)
+         used++;
+     }
+
    int    zIdx[];
    double dist[];
    double zCl[];
-   double zTp[];
+   double zEntry[];
    int    nCand = 0;
    const int nz = ArraySize(g_zones);
    const ENUM_TIMEFRAMES tf = DetectionTF();
@@ -2638,33 +2853,33 @@ void CollectNearestZones(const bool wantBuy, const double bid, const double u,
      {
       if(!ZoneOrderEligible(g_zones[z]))
          continue;
-      double d = 0.0;
-      double cl = 0.0;
-      double tp = 0.0;
-      ZoneClTp(g_zones[z], u, cl, tp);
       if(wantBuy)
         {
          if(!g_zones[z].isSupport || g_zones[z].low > bid)
             continue;
-         d = bid - g_zones[z].low;
         }
       else
         {
          if(g_zones[z].isSupport || g_zones[z].high < bid)
             continue;
-         d = g_zones[z].high - bid;
         }
+      double entry1 = 0.0;
+      double cl = 0.0;
+      double sl = 0.0;
+      const double extreme = wantBuy ? g_zones[z].low : g_zones[z].high;
+      CalcEntryClSl(wantBuy, extreme, u, entry1, cl, sl);
       if(ClBrokenOnClosedBar(wantBuy, cl, tf))
          continue;
+      const double d = wantBuy ? (bid - g_zones[z].low) : (g_zones[z].high - bid);
       nCand++;
       ArrayResize(zIdx, nCand);
       ArrayResize(dist, nCand);
       ArrayResize(zCl, nCand);
-      ArrayResize(zTp, nCand);
-      zIdx[nCand - 1] = z;
-      dist[nCand - 1] = d;
-      zCl[nCand - 1]  = cl;
-      zTp[nCand - 1]  = tp;
+      ArrayResize(zEntry, nCand);
+      zIdx[nCand - 1]    = z;
+      dist[nCand - 1]    = d;
+      zCl[nCand - 1]     = cl;
+      zEntry[nCand - 1]  = entry1;
      }
 
    for(int i = 1; i < nCand; i++)
@@ -2676,32 +2891,47 @@ void CollectNearestZones(const bool wantBuy, const double bid, const double u,
          const int    ti = zIdx[j];
          const double td = dist[j];
          const double tc = zCl[j];
-         const double tt = zTp[j];
+         const double te = zEntry[j];
          zIdx[j]      = zIdx[j - 1];
          dist[j]      = dist[j - 1];
          zCl[j]       = zCl[j - 1];
-         zTp[j]       = zTp[j - 1];
+         zEntry[j]    = zEntry[j - 1];
          zIdx[j - 1]  = ti;
          dist[j - 1]  = td;
          zCl[j - 1]   = tc;
-         zTp[j - 1]   = tt;
+         zEntry[j - 1] = te;
         }
      }
 
    const int cap = MaxGroupsPerSide();
-   for(int i = 0; i < nCand && nOut < cap; i++)
+   for(int i = 0; i < nCand && used < cap; i++)
      {
+      if(IdxHas(idx, nOut, zIdx[i]))
+         continue;
       bool overlap = false;
       for(int k = 0; k < nOut; k++)
         {
          const int pk = idx[k];
+         double pEntry = 0.0;
          double pCl = 0.0;
-         double pTp = 0.0;
-         ZoneClTp(g_zones[pk], u, pCl, pTp);
-         if(TpClOverlap(zCl[i], zTp[i], pCl, pTp))
+         double pSl = 0.0;
+         const double pExt = wantBuy ? g_zones[pk].low : g_zones[pk].high;
+         CalcEntryClSl(wantBuy, pExt, u, pEntry, pCl, pSl);
+         if(ClEntryOverlap(zCl[i], zEntry[i], pCl, pEntry))
            {
             overlap = true;
             break;
+           }
+        }
+      if(!overlap)
+        {
+         for(int p = 0; p < nLive; p++)
+           {
+            if(ClEntryOverlap(zCl[i], zEntry[i], live[p].cl, live[p].entry))
+              {
+               overlap = true;
+               break;
+              }
            }
         }
       if(overlap)
@@ -2709,6 +2939,7 @@ void CollectNearestZones(const bool wantBuy, const double bid, const double u,
       nOut++;
       ArrayResize(idx, nOut);
       idx[nOut - 1] = zIdx[i];
+      used++;
      }
   }
 
@@ -2755,75 +2986,282 @@ void CalcEntryClSl(const bool isBuy, const double extreme, const double u,
   }
 
 //+------------------------------------------------------------------+
-void DrawSellLevels(const double atap, const double tp, const double u, const string kind, const bool drawTp)
+void DrawPreviewSide(const bool isBuy, const double extreme, const double tp,
+                    const double u, const datetime tFrom, const bool drawTp)
   {
+   if(extreme <= 0.0 || u <= 0.0)
+      return;
    double entry1 = 0.0;
    double cl     = 0.0;
    double sl     = 0.0;
-   CalcEntryClSl(false, atap, u, entry1, cl, sl);
-   const int n = LayerCount();
+   CalcEntryClSl(isBuy, extreme, u, entry1, cl, sl);
+   const color clr = clrSilver;
+   const string side = isBuy ? "B" : "S";
+   const string role = isBuy ? "Lantai" : "Atap";
+   const string pfx  = PREFIX_LV + "PV_" + side + "_";
+   CreateLevelSeg(pfx + "AN", extreme, tFrom, clr,
+                  StringFormat("PAC Preview %s\n%s", role, DoubleToString(extreme, _Digits)),
+                  "Preview " + role, STYLE_SOLID, 2);
+   CreateLevelSeg(pfx + "EN", NormalizePrice(entry1), tFrom, clr,
+                  StringFormat("PAC Preview Entry\n%s", DoubleToString(entry1, _Digits)),
+                  "Preview Entry", STYLE_DASH, 1);
+   CreateLevelSeg(pfx + "CL", cl, tFrom, clr,
+                  StringFormat("PAC Preview CL\n%s", DoubleToString(cl, _Digits)),
+                  "Preview CL", STYLE_DASHDOT, 1);
+   CreateLevelSeg(pfx + "SL", sl, tFrom, clr,
+                  StringFormat("PAC Preview SL\n%s", DoubleToString(sl, _Digits)),
+                  "Preview SL", STYLE_DOT, 1);
+   if(drawTp && tp > 0.0)
+      CreateLevelSeg(pfx + "TP", NormalizePrice(tp), tFrom, clr,
+                     StringFormat("PAC Preview TP\n%s", DoubleToString(tp, _Digits)),
+                     "Preview TP", STYLE_SOLID, 1);
+  }
 
-   if(drawTp)
-      CreateLevelLine(PREFIX_LV + "TP_S", tp, clrGold,
-                      StringFormat("PAC TP Sell (%s)\n%s", kind, DoubleToString(tp, _Digits)),
-                      "TP Mandiri");
-   CreateLevelLine(PREFIX_LV + "CL_S", cl, clrOrange,
-                   StringFormat("PAC CL Sell\n%s", DoubleToString(cl, _Digits)),
-                   "CL", STYLE_DASH);
-   CreateLevelLine(PREFIX_LV + "SL_S", sl, clrSilver,
-                   StringFormat("PAC SL Sell\n%s", DoubleToString(sl, _Digits)),
-                   "SL", STYLE_DOT);
-
-   for(int i = 1; i <= n; i++)
+//+------------------------------------------------------------------+
+int FindVizIndex(const string code)
+  {
+   const int n = ArraySize(g_viz);
+   for(int i = 0; i < n; i++)
      {
-      const double entry = entry1 + (atap - entry1) * (double)(i - 1) / (double)n;
-      const string elabel = (n <= 1) ? "Entry" : ("Entry " + IntegerToString(i));
-      CreateLevelLine(PREFIX_LV + "ES" + IntegerToString(i), entry, InpResistColor,
-                      StringFormat("PAC Entry Sell %d/%d\n%s", i, n, DoubleToString(entry, _Digits)),
-                      elabel, STYLE_DASH, 1);
+      if(g_viz[i].code == code)
+         return(i);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+double VizDistToBid(const VizGroup &v, const double bid)
+  {
+   const double px = (v.anchor > 0.0) ? v.anchor : ((v.entry > 0.0) ? v.entry : v.cl);
+   if(px <= 0.0 || bid <= 0.0)
+      return(DBL_MAX);
+   return(MathAbs(bid - px));
+  }
+
+//+------------------------------------------------------------------+
+void AssignVizRanks()
+  {
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   const int n = ArraySize(g_viz);
+   for(int pass = 0; pass < 2; pass++)
+     {
+      const bool wantBuy = (pass == 0);
+      int idx[];
+      int m = 0;
+      for(int i = 0; i < n; i++)
+        {
+         if(g_viz[i].isBuy != wantBuy)
+            continue;
+         ArrayResize(idx, m + 1);
+         idx[m++] = i;
+        }
+      for(int a = 1; a < m; a++)
+        {
+         const int hold = idx[a];
+         const double dHold = VizDistToBid(g_viz[hold], bid);
+         int b = a;
+         while(b > 0 && VizDistToBid(g_viz[idx[b - 1]], bid) > dHold)
+           {
+            idx[b] = idx[b - 1];
+            b--;
+           }
+         idx[b] = hold;
+        }
+      for(int a = 0; a < m; a++)
+         g_viz[idx[a]].rank = a + 1;
      }
   }
 
 //+------------------------------------------------------------------+
-void DrawBuyLevels(const double lantai, const double tp, const double u, const string kind, const bool drawTp)
+void FillVizGroups()
   {
-   double entry1 = 0.0;
-   double cl     = 0.0;
-   double sl     = 0.0;
-   CalcEntryClSl(true, lantai, u, entry1, cl, sl);
-   const int n = LayerCount();
+   ArrayResize(g_viz, 0);
+   if(!ChartVisualsOn())
+      return;
 
-   if(drawTp)
-      CreateLevelLine(PREFIX_LV + "TP_B", tp, clrGold,
-                      StringFormat("PAC TP Buy (%s)\n%s", kind, DoubleToString(tp, _Digits)),
-                      "TP Mandiri");
-   CreateLevelLine(PREFIX_LV + "CL_B", cl, clrOrange,
-                   StringFormat("PAC CL Buy\n%s", DoubleToString(cl, _Digits)),
-                   "CL", STYLE_DASH);
-   CreateLevelLine(PREFIX_LV + "SL_B", sl, clrSilver,
-                   StringFormat("PAC SL Buy\n%s", DoubleToString(sl, _Digits)),
-                   "SL", STYLE_DOT);
-
-   for(int i = 1; i <= n; i++)
+   LiveItem items[];
+   CollectItems(items);
+   const int nItems = ArraySize(items);
+   for(int i = 0; i < nItems; i++)
      {
-      const double entry = entry1 + (lantai - entry1) * (double)(i - 1) / (double)n;
-      const string elabel = (n <= 1) ? "Entry" : ("Entry " + IntegerToString(i));
-      CreateLevelLine(PREFIX_LV + "EB" + IntegerToString(i), entry, InpSupportColor,
-                      StringFormat("PAC Entry Buy %d/%d\n%s", i, n, DoubleToString(entry, _Digits)),
-                      elabel, STYLE_DASH, 1);
+      if(!items[i].parsed)
+         continue;
+      int vi = FindVizIndex(items[i].pac.groupCode);
+      if(vi < 0)
+        {
+         VizGroup v;
+         v.code    = items[i].pac.groupCode;
+         v.isBuy   = items[i].pac.isBuy;
+         v.rank    = 0;
+         v.anchor  = 0.0;
+         v.entry   = items[i].price;
+         v.cl      = items[i].pac.clPrice;
+         v.sl      = items[i].sl;
+         v.tp      = items[i].tp;
+         v.tFrom   = items[i].setupTime;
+         v.hasPos1 = (items[i].pac.position == 1);
+         v.anchor  = ResolveOrderAnchor(items[i].pac.isBuy, items[i].pac.clPrice,
+                                       items[i].sl, items[i].price,
+                                       items[i].pac.layerCount, items[i].pac.position);
+         const int n = ArraySize(g_viz);
+         ArrayResize(g_viz, n + 1);
+         g_viz[n] = v;
+        }
+      else
+        {
+         if(items[i].pac.position == 1)
+           {
+            g_viz[vi].entry   = items[i].price;
+            g_viz[vi].hasPos1 = true;
+           }
+         else if(!g_viz[vi].hasPos1 && g_viz[vi].entry <= 0.0)
+            g_viz[vi].entry = items[i].price;
+         if(items[i].sl > 0.0)
+            g_viz[vi].sl = items[i].sl;
+         if(items[i].tp > 0.0)
+            g_viz[vi].tp = items[i].tp;
+         if(items[i].pac.clPrice > 0.0)
+            g_viz[vi].cl = items[i].pac.clPrice;
+         if(g_viz[vi].anchor <= 0.0)
+            g_viz[vi].anchor = ResolveOrderAnchor(items[i].pac.isBuy, items[i].pac.clPrice,
+                                                  items[i].sl, items[i].price,
+                                                  items[i].pac.layerCount, items[i].pac.position);
+         if(items[i].setupTime > 0 &&
+            (g_viz[vi].tFrom <= 0 || items[i].setupTime < g_viz[vi].tFrom))
+            g_viz[vi].tFrom = items[i].setupTime;
+        }
      }
+
+   const int nv = ArraySize(g_viz);
+   for(int i = 0; i < nv; i++)
+     {
+      if(g_viz[i].anchor <= 0.0)
+        {
+         const int gi = FindGroupIndex(g_viz[i].code);
+         if(gi >= 0)
+            g_viz[i].anchor = g_groups[gi].anchor;
+        }
+      if(g_viz[i].anchor <= 0.0)
+         g_viz[i].anchor = ResolveOrderAnchor(g_viz[i].isBuy, g_viz[i].cl,
+                                              g_viz[i].sl, g_viz[i].entry, 1, 1);
+      const int z = FindZoneIndexForAnchor(g_viz[i].isBuy, g_viz[i].anchor);
+      if(z >= 0)
+        {
+         g_viz[i].anchor = ZoneExtreme(g_viz[i].isBuy, z);
+         g_viz[i].tFrom  = g_zones[z].left;
+        }
+      if(!g_viz[i].hasPos1 && g_viz[i].anchor > 0.0 && g_viz[i].cl > 0.0)
+        {
+         const double k = MathMax(InpCLPercentArea, 0) / 100.0;
+         if(k > 0.0)
+           {
+            const double u = g_viz[i].isBuy ? ((g_viz[i].anchor - g_viz[i].cl) / k)
+                                            : ((g_viz[i].cl - g_viz[i].anchor) / k);
+            if(u > 0.0)
+              {
+               double e1 = 0.0, clx = 0.0, slx = 0.0;
+               CalcEntryClSl(g_viz[i].isBuy, g_viz[i].anchor, u, e1, clx, slx);
+               g_viz[i].entry = NormalizePrice(e1);
+               if(g_viz[i].sl <= 0.0)
+                  g_viz[i].sl = slx;
+              }
+           }
+        }
+     }
+   AssignVizRanks();
+  }
+
+//+------------------------------------------------------------------+
+void DrawArmedVisuals()
+  {
+   if(!ChartVisualsOn())
+      return;
+   ObjectsDeleteAll(0, PREFIX_ATAP);
+   ObjectsDeleteAll(0, PREFIX_LANTAI);
+   ObjectsDeleteAll(0, PREFIX_LV);
+
+   bool hasBuy  = false;
+   bool hasSell = false;
+   const int n = ArraySize(g_viz);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_viz[i].rank <= 0)
+         continue;
+      if(g_viz[i].isBuy)
+         hasBuy = true;
+      else
+         hasSell = true;
+      const color clr = GroupColor(g_viz[i].isBuy, g_viz[i].rank);
+      const string tag = (g_viz[i].isBuy ? "B" : "S") + IntegerToString(g_viz[i].rank);
+      const string pfx = PREFIX_LV + tag + "_";
+      const datetime tFrom = g_viz[i].tFrom;
+      const string role = g_viz[i].isBuy ? "Lantai" : "Atap";
+      CreateLevelSeg(pfx + "AN", g_viz[i].anchor, tFrom, clr,
+                     StringFormat("PAC %s %s\n%s", tag, role, DoubleToString(g_viz[i].anchor, _Digits)),
+                     tag + " " + role, STYLE_SOLID, 2);
+      CreateLevelSeg(pfx + "EN", g_viz[i].entry, tFrom, clr,
+                     StringFormat("PAC %s Entry\n%s", tag, DoubleToString(g_viz[i].entry, _Digits)),
+                     tag + " Entry", STYLE_DASH, 1);
+      CreateLevelSeg(pfx + "CL", g_viz[i].cl, tFrom, clr,
+                     StringFormat("PAC %s CL\n%s", tag, DoubleToString(g_viz[i].cl, _Digits)),
+                     tag + " CL", STYLE_DASHDOT, 1);
+      const bool tpAd = TpIsAdaptiveNow(g_viz[i].isBuy, g_viz[i].entry, g_viz[i].tp);
+      const string tpLabel = tpAd ? (tag + " TP adaptif") : (tag + " TP");
+      CreateLevelSeg(pfx + "TP", g_viz[i].tp, tFrom, clr,
+                     StringFormat("PAC %s TP\n%s", tag, DoubleToString(g_viz[i].tp, _Digits)),
+                     tpLabel, STYLE_SOLID, 1);
+      CreateLevelSeg(pfx + "SL", g_viz[i].sl, tFrom, clr,
+                     StringFormat("PAC %s SL\n%s", tag, DoubleToString(g_viz[i].sl, _Digits)),
+                     tag + " SL", STYLE_DOT, 1);
+     }
+
+   const double u = (g_vizU > 0.0) ? g_vizU : ComputeU();
+   const bool bothPreview = (!hasBuy && !hasSell && g_vizPaired &&
+                             g_vizAtapIdx >= 0 && g_vizLantaiIdx >= 0);
+   if(!hasBuy && g_vizLantaiIdx >= 0)
+     {
+      const SrZone z = g_zones[g_vizLantaiIdx];
+      const double tp = bothPreview ? ((g_zones[g_vizAtapIdx].high + z.low) * 0.5)
+                                    : MandiriTp(true, z.low, u);
+      DrawPreviewSide(true, z.low, tp, u, z.left, !bothPreview);
+     }
+   if(!hasSell && g_vizAtapIdx >= 0)
+     {
+      const SrZone z = g_zones[g_vizAtapIdx];
+      const double tp = bothPreview ? ((z.high + g_zones[g_vizLantaiIdx].low) * 0.5)
+                                    : MandiriTp(false, z.high, u);
+      DrawPreviewSide(false, z.high, tp, u, z.left, !bothPreview);
+     }
+   if(bothPreview)
+     {
+      const double tp = (g_zones[g_vizAtapIdx].high + g_zones[g_vizLantaiIdx].low) * 0.5;
+      datetime tFrom = g_zones[g_vizAtapIdx].left;
+      if(g_zones[g_vizLantaiIdx].left < tFrom)
+         tFrom = g_zones[g_vizLantaiIdx].left;
+      CreateLevelSeg(PREFIX_LV + "PV_TP", NormalizePrice(tp), tFrom, clrSilver,
+                     StringFormat("PAC Preview TP pasangan\n%s", DoubleToString(tp, _Digits)),
+                     "Preview TP", STYLE_SOLID, 1);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void RefreshChartVisuals()
+  {
+   if(!ChartVisualsOn())
+      return;
+   FillVizGroups();
+   DrawSrZones();
+   DrawArmedVisuals();
+   ChartRedraw(0);
   }
 
 //+------------------------------------------------------------------+
 void DrawAtapLantai()
   {
-   const bool draw = ChartVisualsOn();
-   if(draw)
-     {
-      ObjectsDeleteAll(0, PREFIX_ATAP);
-      ObjectsDeleteAll(0, PREFIX_LANTAI);
-      ObjectsDeleteAll(0, PREFIX_LV);
-     }
+   g_vizAtapIdx   = -1;
+   g_vizLantaiIdx = -1;
+   g_vizPaired    = false;
+   g_vizU         = ComputeU();
 
    const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(bid <= 0.0)
@@ -2867,53 +3305,12 @@ void DrawAtapLantai()
    const bool hasLantai = (lantaiIdx >= 0);
    const double atap   = hasAtap   ? g_zones[atapIdx].high : 0.0;
    const double lantai = hasLantai ? g_zones[lantaiIdx].low : 0.0;
-   const double u          = ComputeU();
-   const bool paired = (hasAtap && hasLantai && AutoPairZones(atap, lantai, u));
+   const double u      = g_vizU;
+   const bool paired   = (hasAtap && hasLantai && AutoPairZones(atap, lantai, u));
 
-   if(draw)
-     {
-      if(hasAtap)
-        {
-         const SrZone z = g_zones[atapIdx];
-         const int rk = PivotRank(z.pivotTime, PIVOT_SELL);
-         CreateLevelLine(PREFIX_ATAP, z.high, InpResistColor,
-                         StringFormat("PAC Atap (Pivot Sell ke-%d)\n%s\nH=%s",
-                                      rk,
-                                      TimeToString(z.left, TIME_DATE | TIME_MINUTES),
-                                      DoubleToString(z.high, _Digits)),
-                         "Atap");
-        }
-      if(hasLantai)
-        {
-         const SrZone z = g_zones[lantaiIdx];
-         const int rk = PivotRank(z.pivotTime, PIVOT_BUY);
-         CreateLevelLine(PREFIX_LANTAI, z.low, InpSupportColor,
-                         StringFormat("PAC Lantai (Pivot Buy ke-%d)\n%s\nL=%s",
-                                      rk,
-                                      TimeToString(z.left, TIME_DATE | TIME_MINUTES),
-                                      DoubleToString(z.low, _Digits)),
-                         "Lantai");
-        }
-
-      if(paired)
-        {
-         const double tp = (atap + lantai) * 0.5;
-         CreateLevelLine(PREFIX_LV + "TP", tp, clrGold,
-                         StringFormat("PAC TP (Paired)\n%s", DoubleToString(tp, _Digits)),
-                         "TP Pasangan");
-         DrawSellLevels(atap, tp, u, "Paired", false);
-         DrawBuyLevels(lantai, tp, u, "Paired", false);
-        }
-      else
-        {
-         const double tpS = hasAtap   ? MandiriTp(false, atap, u)   : 0.0;
-         const double tpB = hasLantai ? MandiriTp(true, lantai, u)  : 0.0;
-         if(hasAtap)
-            DrawSellLevels(atap, tpS, u, "Mandiri", true);
-         if(hasLantai)
-            DrawBuyLevels(lantai, tpB, u, "Mandiri", true);
-        }
-     }
+   g_vizAtapIdx   = atapIdx;
+   g_vizLantaiIdx = lantaiIdx;
+   g_vizPaired    = paired;
    MaybeSendEligible(atapIdx, lantaiIdx, paired, u);
   }
 
@@ -3059,10 +3456,188 @@ bool SameCl(const double a, const double b)
   }
 
 //+------------------------------------------------------------------+
-bool PacScan(const bool wantBuy, const double cl, const int wantPos,
+double AnchorFromClSl(const bool isBuy, const double cl, const double sl)
+  {
+   const double k = MathMax(InpCLPercentArea, 0) / 100.0;
+   const double s = MathMax(InpSLPercentArea, 0) / 100.0;
+   if(cl <= 0.0 || sl <= 0.0 || s <= k)
+      return(0.0);
+   if(isBuy)
+     {
+      if(cl <= sl)
+         return(0.0);
+      const double u = (cl - sl) / (s - k);
+      if(u <= 0.0)
+         return(0.0);
+      return(NormalizePrice(cl + k * u));
+     }
+   if(sl <= cl)
+      return(0.0);
+   const double u = (sl - cl) / (s - k);
+   if(u <= 0.0)
+      return(0.0);
+   return(NormalizePrice(cl - k * u));
+  }
+
+//+------------------------------------------------------------------+
+double AnchorFromClEntry(const bool isBuy, const double cl, const double entry,
+                         const int layers, const int pos)
+  {
+   const double k = MathMax(InpCLPercentArea, 0) / 100.0;
+   if(cl <= 0.0 || entry <= 0.0 || layers < 1 || pos < 1)
+      return(0.0);
+   const double frac = (double)(layers - pos + 1) / (double)layers;
+   const double den = frac + k;
+   if(den <= 0.0)
+      return(0.0);
+   if(isBuy)
+     {
+      if(entry <= cl)
+         return(0.0);
+      const double u = (entry - cl) / den;
+      if(u <= 0.0)
+         return(0.0);
+      return(NormalizePrice(cl + k * u));
+     }
+   if(cl <= entry)
+      return(0.0);
+   const double u = (cl - entry) / den;
+   if(u <= 0.0)
+      return(0.0);
+   return(NormalizePrice(cl - k * u));
+  }
+
+//+------------------------------------------------------------------+
+double ResolveOrderAnchor(const bool isBuy, const double cl, const double sl,
+                           const double entry, const int layers, const int pos)
+  {
+   const double fromSl = AnchorFromClSl(isBuy, cl, sl);
+   if(fromSl > 0.0)
+      return(fromSl);
+   return(AnchorFromClEntry(isBuy, cl, entry, layers, pos));
+  }
+
+//+------------------------------------------------------------------+
+int FindZoneIndexForAnchor(const bool isBuy, const double anchor)
+  {
+   if(anchor <= 0.0)
+      return(-1);
+   int best = -1;
+   double bestD = DBL_MAX;
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport != isBuy)
+         continue;
+      const double ext = isBuy ? g_zones[z].low : g_zones[z].high;
+      const double d = MathAbs(ext - anchor);
+      if(d < bestD)
+        {
+         bestD = d;
+         best = z;
+        }
+     }
+   if(best < 0)
+      return(-1);
+   const double ext = isBuy ? g_zones[best].low : g_zones[best].high;
+   if(!SameCl(ext, anchor))
+      return(-1);
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+int FindZoneIndexForFrozenCl(const bool isBuy, const double cl)
+  {
+   int best = -1;
+   double bestD = DBL_MAX;
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport != isBuy)
+         continue;
+      double d = 0.0;
+      if(isBuy)
+        {
+         if(g_zones[z].low <= cl)
+            continue;
+         d = g_zones[z].low - cl;
+        }
+      else
+        {
+         if(g_zones[z].high >= cl)
+            continue;
+         d = cl - g_zones[z].high;
+        }
+      if(d < bestD)
+        {
+         bestD = d;
+         best = z;
+        }
+     }
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+double ZoneExtreme(const bool isBuy, const int z)
+  {
+   if(z < 0 || z >= ArraySize(g_zones))
+      return(0.0);
+   return(isBuy ? g_zones[z].low : g_zones[z].high);
+  }
+
+//+------------------------------------------------------------------+
+double SlotAnchor(const TpSlot &slot)
+  {
+   if(slot.anchor > 0.0)
+      return(slot.anchor);
+   const int z = FindZoneIndexForFrozenCl(slot.isBuy, slot.clPrice);
+   return(ZoneExtreme(slot.isBuy, z));
+  }
+
+//+------------------------------------------------------------------+
+int ZoneIndexFromOrderLevels(const bool isBuy, const double cl, const double sl,
+                             const double entry, const int layers, const int pos)
+  {
+   const double a = ResolveOrderAnchor(isBuy, cl, sl, entry, layers, pos);
+   const int z = FindZoneIndexForAnchor(isBuy, a);
+   if(z >= 0)
+      return(z);
+   return(FindZoneIndexForFrozenCl(isBuy, cl));
+  }
+
+//+------------------------------------------------------------------+
+bool LiveSlotsHaveAnchor(const bool isBuy, const double anchor,
+                         const int &buyIdx[], const int nBuy,
+                         const int &sellIdx[], const int nSell)
+  {
+   if(anchor <= 0.0)
+      return(false);
+   if(isBuy)
+     {
+      for(int i = 0; i < nBuy; i++)
+        {
+         if(SameCl(g_zones[buyIdx[i]].low, anchor))
+            return(true);
+        }
+     }
+   else
+     {
+      for(int i = 0; i < nSell; i++)
+        {
+         if(SameCl(g_zones[sellIdx[i]].high, anchor))
+            return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool PacScan(const bool wantBuy, const double anchor, const int wantPos,
              const bool positions, const bool pendings, string &tsOut)
   {
    tsOut = "";
+   if(anchor <= 0.0)
+      return(false);
    if(positions)
      {
       const int np = PositionsTotal();
@@ -3075,19 +3650,20 @@ bool PacScan(const bool wantBuy, const double cl, const int wantPos,
             continue;
          if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
             continue;
-         bool buy = false;
-         int pos = 0;
-         double ccl = 0.0;
-         string ts = "";
-         if(!ParsePacComment(PositionGetString(POSITION_COMMENT), buy, pos, ccl, ts))
+         PacCmt p;
+         if(!ParsePacCommentEx(PositionGetString(POSITION_COMMENT), p))
             continue;
-         if(buy != wantBuy)
+         if(p.isBuy != wantBuy)
             continue;
-         if(wantPos > 0 && pos != wantPos)
+         if(wantPos > 0 && p.position != wantPos)
             continue;
-         if(!SameCl(ccl, cl))
+         const int z = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                               PositionGetDouble(POSITION_SL),
+                                               PositionGetDouble(POSITION_PRICE_OPEN),
+                                               p.layerCount, p.position);
+         if(z < 0 || !SameCl(ZoneExtreme(wantBuy, z), anchor))
             continue;
-         tsOut = ts;
+         tsOut = p.stamp;
          return(true);
         }
      }
@@ -3103,19 +3679,20 @@ bool PacScan(const bool wantBuy, const double cl, const int wantPos,
             continue;
          if(OrderGetInteger(ORDER_MAGIC) != InpMagic)
             continue;
-         bool buy = false;
-         int pos = 0;
-         double ccl = 0.0;
-         string ts = "";
-         if(!ParsePacComment(OrderGetString(ORDER_COMMENT), buy, pos, ccl, ts))
+         PacCmt p;
+         if(!ParsePacCommentEx(OrderGetString(ORDER_COMMENT), p))
             continue;
-         if(buy != wantBuy)
+         if(p.isBuy != wantBuy)
             continue;
-         if(wantPos > 0 && pos != wantPos)
+         if(wantPos > 0 && p.position != wantPos)
             continue;
-         if(!SameCl(ccl, cl))
+         const int z = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                               OrderGetDouble(ORDER_SL),
+                                               OrderGetDouble(ORDER_PRICE_OPEN),
+                                               p.layerCount, p.position);
+         if(z < 0 || !SameCl(ZoneExtreme(wantBuy, z), anchor))
             continue;
-         tsOut = ts;
+         tsOut = p.stamp;
          return(true);
         }
      }
@@ -3123,35 +3700,36 @@ bool PacScan(const bool wantBuy, const double cl, const int wantPos,
   }
 
 //+------------------------------------------------------------------+
-bool HasPacSide(const bool isBuy, const double cl, string &tsOut)
+bool HasPacSide(const bool isBuy, const double anchor, string &tsOut)
   {
-   return(PacScan(isBuy, cl, 0, true, true, tsOut));
+   return(PacScan(isBuy, anchor, 0, true, true, tsOut));
   }
 
 //+------------------------------------------------------------------+
-bool HasPacLayer(const bool isBuy, const double cl, const int pos)
-  {
-   string ts = "";
-   return(PacScan(isBuy, cl, pos, true, true, ts));
-  }
-
-//+------------------------------------------------------------------+
-bool HasPacPosition(const bool isBuy, const double cl)
+bool HasPacLayer(const bool isBuy, const double anchor, const int pos)
   {
    string ts = "";
-   return(PacScan(isBuy, cl, 0, true, false, ts));
+   return(PacScan(isBuy, anchor, pos, true, true, ts));
   }
 
 //+------------------------------------------------------------------+
-bool HasQueuedReentry(const bool isBuy, const double cl)
+bool HasPacPosition(const bool isBuy, const double anchor)
+  {
+   string ts = "";
+   return(PacScan(isBuy, anchor, 0, true, false, ts));
+  }
+
+//+------------------------------------------------------------------+
+bool HasQueuedReentry(const bool isBuy, const double anchor)
   {
    const int n = ArraySize(g_tpBatches);
    for(int i = 0; i < n; i++)
      {
       for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
         {
-         if(g_tpBatches[i].slots[s].isBuy == isBuy &&
-            SameCl(g_tpBatches[i].slots[s].clPrice, cl))
+         if(g_tpBatches[i].slots[s].isBuy != isBuy)
+            continue;
+         if(SameCl(SlotAnchor(g_tpBatches[i].slots[s]), anchor))
             return(true);
         }
      }
@@ -3159,7 +3737,8 @@ bool HasQueuedReentry(const bool isBuy, const double cl)
   }
 
 //+------------------------------------------------------------------+
-void CancelStalePendings(const double &liveCl[], const bool &liveBuy[], const int nLive)
+void CancelStalePendings(const int &buyIdx[], const int nBuy,
+                         const int &sellIdx[], const int nSell)
   {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
@@ -3173,18 +3752,16 @@ void CancelStalePendings(const double &liveCl[], const bool &liveBuy[], const in
       PacCmt p;
       if(!ParsePacCommentEx(OrderGetString(ORDER_COMMENT), p))
          continue;
-      const bool buy = p.isBuy;
-      const double ccl = p.clPrice;
-      bool current = false;
-      for(int k = 0; k < nLive; k++)
-        {
-         if(liveBuy[k] == buy && SameCl(liveCl[k], ccl))
-           {
-            current = true;
-            break;
-           }
-        }
-      if(current)
+      const int z = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                            OrderGetDouble(ORDER_SL),
+                                            OrderGetDouble(ORDER_PRICE_OPEN),
+                                            p.layerCount, p.position);
+      const double anchor = (z >= 0) ? ZoneExtreme(p.isBuy, z)
+                                       : ResolveOrderAnchor(p.isBuy, p.clPrice,
+                                                             OrderGetDouble(ORDER_SL),
+                                                             OrderGetDouble(ORDER_PRICE_OPEN),
+                                                             p.layerCount, p.position);
+      if(LiveSlotsHaveAnchor(p.isBuy, anchor, buyIdx, nBuy, sellIdx, nSell))
          continue;
       const string cmt = OrderGetString(ORDER_COMMENT);
       if(g_trade.OrderDelete(ticket) && TradeOk())
@@ -3196,7 +3773,8 @@ void CancelStalePendings(const double &liveCl[], const bool &liveBuy[], const in
   }
 
 //+------------------------------------------------------------------+
-void DropStaleTpBatches(const double &liveCl[], const bool &liveBuy[], const int nLive)
+void DropStaleTpBatches(const int &buyIdx[], const int nBuy,
+                        const int &sellIdx[], const int nSell)
   {
    for(int i = ArraySize(g_tpBatches) - 1; i >= 0; i--)
      {
@@ -3205,14 +3783,15 @@ void DropStaleTpBatches(const double &liveCl[], const bool &liveBuy[], const int
       if(gi >= 0)
         {
          const bool buy = (g_groups[gi].direction > 0);
-         for(int k = 0; k < nLive; k++)
+         double anchor = g_groups[gi].anchor;
+         if(anchor <= 0.0 && ArraySize(g_tpBatches[i].slots) > 0)
+            anchor = SlotAnchor(g_tpBatches[i].slots[0]);
+         if(anchor <= 0.0)
            {
-            if(liveBuy[k] == buy && SameCl(liveCl[k], g_groups[gi].clPrice))
-              {
-               live = true;
-               break;
-              }
+            const int z = FindZoneIndexForFrozenCl(buy, g_groups[gi].clPrice);
+            anchor = ZoneExtreme(buy, z);
            }
+         live = LiveSlotsHaveAnchor(buy, anchor, buyIdx, nBuy, sellIdx, nSell);
         }
       if(!live)
          RemoveTpBatchAt(i);
@@ -3319,12 +3898,12 @@ void SendSide(const bool isBuy, const bool paired, const double extreme, const d
    CalcEntryClSl(isBuy, extreme, u, entry1, cl, sl);
    const double tpN = NormalizePrice(tp);
    string dummy = "";
-   if(HasPacSide(isBuy, cl, dummy) || HasQueuedReentry(isBuy, cl))
+   if(HasPacSide(isBuy, extreme, dummy) || HasQueuedReentry(isBuy, extreme))
       return;
 
    for(int i = 1; i <= n; i++)
      {
-      if(HasPacLayer(isBuy, cl, i))
+      if(HasPacLayer(isBuy, extreme, i))
          continue;
       double entry = entry1 + (extreme - entry1) * (double)(i - 1) / (double)n;
       entry = NormalizePrice(entry);
@@ -3415,8 +3994,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
    bool   liveBuy[];
    int    nLive = 0;
    BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
-   CancelStalePendings(liveCl, liveBuy, nLive);
-   DropStaleTpBatches(liveCl, liveBuy, nLive);
+   CancelStalePendings(buyIdx, nBuy, sellIdx, nSell);
+   DropStaleTpBatches(buyIdx, nBuy, sellIdx, nSell);
 
    datetime stamp = TimeCurrent();
    const bool pairKeep = (paired && atapIdx >= 0 && lantaiIdx >= 0 &&
@@ -3429,8 +4008,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       const double clB = NormalizePrice(g_zones[lantaiIdx].low - buf);
       string tsS = "";
       string tsB = "";
-      HasPacSide(false, clS, tsS);
-      HasPacSide(true, clB, tsB);
+      HasPacSide(false, g_zones[atapIdx].high, tsS);
+      HasPacSide(true, g_zones[lantaiIdx].low, tsB);
       string ts = "";
       if(StringLen(tsS) > 0)
          ts = tsS;
@@ -3453,9 +4032,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       const int z = buyIdx[i];
       if(pairKeep && z == lantaiIdx)
          continue;
-      const double cl = NormalizePrice(g_zones[z].low - buf);
       string ts = "";
-      if(!HasPacSide(true, cl, ts) || StringLen(ts) == 0)
+      if(!HasPacSide(true, g_zones[z].low, ts) || StringLen(ts) == 0)
         {
          ts = StampNow(stamp);
          stamp++;
@@ -3468,9 +4046,8 @@ void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired
       const int z = sellIdx[i];
       if(pairKeep && z == atapIdx)
          continue;
-      const double cl = NormalizePrice(g_zones[z].high + buf);
       string ts = "";
-      if(!HasPacSide(false, cl, ts) || StringLen(ts) == 0)
+      if(!HasPacSide(false, g_zones[z].high, ts) || StringLen(ts) == 0)
         {
          ts = StampNow(stamp);
          stamp++;
@@ -3578,13 +4155,16 @@ int FindZoneIndexForCl(const bool isBuy, const double cl)
       if(SameCl(zcl, cl))
          return(z);
      }
-   return(-1);
+   return(FindZoneIndexForFrozenCl(isBuy, cl));
   }
 
 //+------------------------------------------------------------------+
 bool GroupPivotCapReached(const PacGroup &g)
   {
-   const int z = FindZoneIndexForCl(g.direction > 0, g.clPrice);
+   const bool isBuy = (g.direction > 0);
+   int z = (g.anchor > 0.0) ? FindZoneIndexForAnchor(isBuy, g.anchor) : -1;
+   if(z < 0)
+      z = FindZoneIndexForCl(isBuy, g.clPrice);
    if(z < 0)
       return(false);
    return(g_zones[z].pivotTouches >= MaxPivotTouches());
@@ -3871,6 +4451,14 @@ void SyncGroups(const LiveItem &items[])
       g.groupCode           = items[i].pac.groupCode;
       g.timeframe           = items[i].pac.timeframe;
       g.clPrice             = items[i].pac.clPrice;
+      g.anchor             = ResolveOrderAnchor(items[i].pac.isBuy, items[i].pac.clPrice,
+                                                   items[i].sl, items[i].price,
+                                                   items[i].pac.layerCount, items[i].pac.position);
+      if(g.anchor <= 0.0)
+        {
+         const int z = FindZoneIndexForFrozenCl(items[i].pac.isBuy, items[i].pac.clPrice);
+         g.anchor = ZoneExtreme(items[i].pac.isBuy, z);
+        }
       g.tfText              = items[i].pac.tfText;
       g.layerCount          = items[i].pac.layerCount;
       g.direction           = IsBuyOrderType(items[i].orderType) ? 1 : -1;
@@ -3896,6 +4484,8 @@ void SyncGroups(const LiveItem &items[])
          g.lastCheckedBarTime = g_groups[oldIdx].lastCheckedBarTime;
          g.reentryCount       = g_groups[oldIdx].reentryCount;
          g.clExecuted         = g_groups[oldIdx].clExecuted;
+         if(g.anchor <= 0.0)
+            g.anchor = g_groups[oldIdx].anchor;
         }
       else
          InitClccBarState(g);
@@ -4010,7 +4600,7 @@ void DeletePendingInGroup(PacGroup &g, const string tag)
   }
 
 //+------------------------------------------------------------------+
-void QueueTpReentry(const PacCmt &pac)
+void QueueTpReentry(const PacCmt &pac, const double sl, const double entry)
   {
    int bi = FindBatchIndex(pac.groupCode);
    if(bi < 0)
@@ -4030,6 +4620,13 @@ void QueueTpReentry(const PacCmt &pac)
    slot.layerCount = pac.layerCount;
    slot.position   = pac.position;
    slot.clPrice    = pac.clPrice;
+   slot.anchor     = ResolveOrderAnchor(pac.isBuy, pac.clPrice, sl, entry,
+                                        pac.layerCount, pac.position);
+   if(slot.anchor <= 0.0)
+     {
+      const int z = FindZoneIndexForFrozenCl(pac.isBuy, pac.clPrice);
+      slot.anchor = ZoneExtreme(pac.isBuy, z);
+     }
    slot.stamp      = pac.stamp;
    const int ns = ArraySize(g_tpBatches[bi].slots);
    ArrayResize(g_tpBatches[bi].slots, ns + 1);
@@ -4049,22 +4646,24 @@ void RemoveTpBatchAt(const int index)
 
 //+------------------------------------------------------------------+
 //| Reentry menghitung ulang Entry/CL/SL/TP dari nol pakai U saat ini |
-//| (bisa beda dari kirim pertama, lihat aturan U di ComputeU()).     |
-//| Anchor dicari lagi dari g_zones lewat clPrice yg tersimpan di     |
-//| slot -- zona itu sendiri (high/low mentah) tidak pernah berubah   |
-//| terlepas dari U, jadi aman dipakai sebagai referensi permanen.    |
-//| TP: mandiri, atau Auto Pasangan jika jarak Atap-Lantai lolos.     |
+//| (boleh beda dari kirim pertama). Anchor zona (lantai/atap)       |
+//| terkunci di slot, tidak ikut ATR. TP: mandiri atau Auto Pasangan.|
 //+------------------------------------------------------------------+
 bool PlaceReentry(const TpSlot &slot, const double &liveCl[], const bool &liveBuy[], const int nLive)
   {
-   const int zi = FindZoneIndexForCl(slot.isBuy, slot.clPrice);
+   double anchor = slot.anchor;
+   int zi = -1;
+   if(anchor > 0.0)
+      zi = FindZoneIndexForAnchor(slot.isBuy, anchor);
+   if(zi < 0)
+      zi = FindZoneIndexForCl(slot.isBuy, slot.clPrice);
    if(zi < 0)
       return(false);
-   const double anchor = slot.isBuy ? g_zones[zi].low : g_zones[zi].high;
+   anchor = slot.isBuy ? g_zones[zi].low : g_zones[zi].high;
    const double u = ComputeU();
    double entry1 = 0.0, cl = 0.0, sl = 0.0;
    CalcEntryClSl(slot.isBuy, anchor, u, entry1, cl, sl);
-   if(HasPacLayer(slot.isBuy, cl, slot.position))
+   if(HasPacLayer(slot.isBuy, anchor, slot.position))
       return(true);
    const double mandiri = MandiriTp(slot.isBuy, anchor, u);
    const double tp = IndependentTp(slot.isBuy, anchor, u, liveCl, liveBuy, nLive);
@@ -4253,8 +4852,9 @@ void ApplyPivotCapAndSlots()
    int    nBuy = 0;
    int    nSell = 0;
    BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
-   CancelStalePendings(liveCl, liveBuy, nLive);
-   DropStaleTpBatches(liveCl, liveBuy, nLive);
+   CancelStalePendings(buyIdx, nBuy, sellIdx, nSell);
+   DropStaleTpBatches(buyIdx, nBuy, sellIdx, nSell);
+   RefreshChartVisuals();
   }
 
 //+------------------------------------------------------------------+
@@ -4389,14 +4989,26 @@ void HandleTradeTransaction(const MqlTradeTransaction &trans)
       return;
    if(g_groups[gi].clExecuted || g_clccGroup == pac.groupCode)
       return;
-   if(WasClcc(pac.isBuy, pac.clPrice))
+   double clccAnchor = ResolveOrderAnchor(pac.isBuy, pac.clPrice, snap.sl, snap.entry,
+                                          pac.layerCount, pac.position);
+   if(clccAnchor <= 0.0)
+     {
+      if(g_groups[gi].anchor > 0.0)
+         clccAnchor = g_groups[gi].anchor;
+      else
+        {
+         const int z = FindZoneIndexForFrozenCl(pac.isBuy, pac.clPrice);
+         clccAnchor = ZoneExtreme(pac.isBuy, z);
+        }
+     }
+   if(WasClcc(pac.isBuy, clccAnchor))
       return;
    if(reason == DEAL_REASON_EXPERT)
       return;
 
    if(reason == DEAL_REASON_TP)
      {
-      QueueTpReentry(pac);
+      QueueTpReentry(pac, snap.sl, snap.entry);
       if(!g_inRefresh)
          ManageOrders();
       return;
