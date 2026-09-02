@@ -4,7 +4,7 @@
 //|  Reentry setelah TP. CLCC close candle, bukan SL sentuh.         |
 //+------------------------------------------------------------------+
 #property copyright "PAC Auto Entry"
-#property version   "1.06"
+#property version   "1.10"
 #property description "PAC Auto Entry — Pivot, Base, Control, pending, CLCC, reentry"
 
 #include <Trade/Trade.mqh>
@@ -28,6 +28,12 @@ enum ENUM_PIVOT_MARK
    MARK_CIRCLE     = 108, // Lingkaran
    MARK_ARROW      = 233, // Panah atas/bawah
    MARK_TRIANGLE   = 241  // Segitiga atas/bawah
+  };
+
+enum ENUM_PIVOT_MODE
+  {
+   PIVOT_MODE_KETAT   = 0, // Ketat
+   PIVOT_MODE_LONGGAR = 1  // Longgar
   };
 
 enum ENUM_HOUR_FILTER
@@ -90,46 +96,49 @@ enum ENUM_DETECTION_TF
 //| INPUTS                                                           |
 //+------------------------------------------------------------------+
 input group "=== Deteksi ==="
-input ENUM_DETECTION_TF InpDetectionTF = TF_AUTO;         // TF Pivot & Base
+input ENUM_DETECTION_TF InpDetectionTF   = TF_AUTO;          // TF Pivot & Base
 input int               InpLookback       = 600;             // Jml bar scan
 input int               InpMaxBaseCandles = 10;              // Maks candle Base per zona
-input ENUM_PIVOT_MARK   InpPivotSymbol = MARK_LOZENGE_SM; // Pivot - Style Tag
-input int               InpGapPips     = 0;               // Pivot - Offset Tag (pips)
-input color             InpPivotColor  = clrYellow;       // Pivot - Warna Tag
-input color             InpBaseColor   = clrWhite;        // Base - Warna Candle
-input color             InpSupportColor = clrForestGreen; // RBR - Warna Zona
-input color             InpResistColor  = clrFireBrick;   // DBD - Warna Zona
+input ENUM_PIVOT_MODE   InpPivotMode      = PIVOT_MODE_KETAT; // Mode Pivot
 
-input group "=== Area (U = jarak Anchor-Entry) ==="
-input ENUM_U_MODE InpUMode       = U_FIXED_PIPS; // Sumber U
-input int         InpUPips       = 150;          // U - pip tetap
-input int         InpUAtrPercent = 100;          // U - ATR %
-input int InpCLPercentArea = 30;  // Anchor->CL = % x U
-input int InpTPPercentArea = 200; // Anchor->TP = % x U
-input bool InpAutoPasangan = true; // Auto Pasangan
-input int InpSLPercentArea = 300; // Anchor->SL = % x U
-input int InpLayerCount    = 3;   // Jumlah layer
+input group "=== Area ==="
+input ENUM_U_MODE InpUMode         = U_FIXED_PIPS; // Sumber
+input int         InpUPips         = 150;          // U - Pip Tetap
+input int         InpUAtrPercent   = 100;          // U - ATR
+input int         InpAtrPeriod     = 14;           // ATR Periode
+input int         InpCLPercentArea = 30;          // Anchor -> CL
+input int         InpTPPercentArea = 200;          // Anchor -> TP
+input int         InpSLPercentArea = 300;          // Anchor -> SL
+input bool        InpTpAdaptive    = true;         // TP Adaptif
 
 input group "=== Order ==="
-input bool   InpSendOrders        = true; // Kirim pending otomatis
-input double InpLot               = 0.01; // Lot dasar (layer 1 / jauh dari CL)
-input bool   InpLotStepUp         = true; // Lot bertingkat jika layer > 1 (terbesar dekat CL)
-input int    InpMaxGroupsPerSide  = 2;    // Maks grup per arah (Buy/Sell)
-input int    InpMaxPivotTouches   = 5;    // Maks sentuhan pivot (termasuk yg mengaktifkan)
-input bool   InpAlertOnCL       = false; // Alert saat CLCC
-input bool   InpAlertOnReentry  = false; // Alert saat reentry
-input int    InpMaxReentry      = 3;     // Maks reentry per grup setelah TP
+input double InpLot              = 0.01; // Lot Dasar
+input int    InpLayerCount       = 3;    // Jml Layer
+input bool   InpLotStepUp        = true;  // Lot bertingkat
+input int    InpMaxPivotTouches  = 4;    // Maks sentuhan pivot
+input int    InpMaxGroupsPerSide = 1;    // Maks grup per arah
+input int    InpMaxReentry       = 3;    // Maks reentry grup after TP
+input bool   InpAutoPasangan     = true;  // Auto Pasangan
 
 input group "=== Filter ==="
-input ENUM_HOUR_FILTER InpHourFilter = HOUR_FLATTEN_ALL; // Filter Jam
-input ENUM_NEWS_FILTER InpNewsFilter = NEWS_30_60;       // Filter News
-input ENUM_DAY_FILTER  InpDayFilter  = DAY_THURSDAY;     // Filter Hari
+input ENUM_HOUR_FILTER InpHourFilter = HOUR_CANCEL_PENDING; // Filter Jam
+input ENUM_NEWS_FILTER InpNewsFilter = NEWS_60_60;          // Filter News
+input ENUM_DAY_FILTER  InpDayFilter  = DAY_FILTER_OFF;     // Filter Hari
 
-input group "=== TP Adaptif ==="
-input bool InpTpAdaptive = false; // TP menyempit otomatis ke zona standby terdekat (searah), tidak pernah melebar
+input group "=== Chart On Tester ==="
+input bool InpChartLiteMode  = false; // Sembunyikan zona kadaluarsa
+input bool InpDebugChartObj = false; // Log tiap object
 
-input group "=== Tampilan Chart (Tester) ==="
-input bool InpChartLiteMode = true; // Mode ringan: sembunyikan zona kadaluarsa (kurangi jumlah objek chart)
+// Disembunyikan dari dialog; nilai tetap dipakai kode.
+const ENUM_PIVOT_MARK InpPivotSymbol     = MARK_LOZENGE_SM;
+const int              InpGapPips      = 0;
+const color            InpPivotColor   = clrYellow;
+const color            InpBaseColor    = clrWhite;
+const color            InpSupportColor = clrForestGreen;
+const color            InpResistColor  = clrFireBrick;
+const bool              InpSendOrders      = true;
+const bool              InpAlertOnCL       = false;
+const bool              InpAlertOnReentry  = false;
 
 //+------------------------------------------------------------------+
 //| CONST                                                            |
@@ -155,7 +164,6 @@ const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low
 const long   InpMagic         = 999; // Magic Number EA PAC (bukan 0)
 const int    InpDeviation     = 30;
 const int    InpTpWindowMs    = 1000;
-const int    U_ATR_PERIOD     = 14; // periode ATR U, bukan input
 
 struct Pivot
   {
@@ -342,9 +350,41 @@ bool ChartVisualsOn()
   }
 
 //+------------------------------------------------------------------+
+void PacObjLog(const string kind, const string name, const datetime t,
+                 const double price, const string extra = "")
+  {
+   if(!InpDebugChartObj || !ChartVisualsOn())
+      return;
+   if(t > 0)
+     {
+      const int sh = iBarShift(_Symbol, PERIOD_CURRENT, t, false);
+      if(sh > MathMax(InpLookback, 50))
+         return;
+     }
+   string msg = "PAC obj " + kind + " " + name;
+   if(t > 0)
+      msg += " t=" + TimeToString(t, TIME_DATE | TIME_MINUTES);
+   if(price > 0.0)
+      msg += " p=" + DoubleToString(price, _Digits);
+   if(extra != "")
+      msg += " " + extra;
+   Print(msg);
+  }
+
+//+------------------------------------------------------------------+
 bool UUsesAtr()
   {
    return(InpUMode != U_FIXED_PIPS);
+  }
+
+int AtrPeriod()
+  {
+   return(MathMax(InpAtrPeriod, 1));
+  }
+
+bool PivotKetatOn()
+  {
+   return(InpPivotMode == PIVOT_MODE_KETAT);
   }
 
 //+------------------------------------------------------------------+
@@ -361,11 +401,11 @@ ENUM_TIMEFRAMES UAtrTimeframe()
 string USourceText()
   {
    if(InpUMode == U_ATR_CURRENT)
-      return(StringFormat("ATR Current(%d) x %d%%", U_ATR_PERIOD, MathMax(InpUAtrPercent, 0)));
+      return(StringFormat("ATR Current(%d) x %d%%", AtrPeriod(), MathMax(InpUAtrPercent, 0)));
    if(InpUMode == U_ATR_H1)
-      return(StringFormat("ATR H1(%d) x %d%%", U_ATR_PERIOD, MathMax(InpUAtrPercent, 0)));
+      return(StringFormat("ATR H1(%d) x %d%%", AtrPeriod(), MathMax(InpUAtrPercent, 0)));
    if(InpUMode == U_ATR_D)
-      return(StringFormat("ATR D(%d) x %d%%", U_ATR_PERIOD, MathMax(InpUAtrPercent, 0)));
+      return(StringFormat("ATR D(%d) x %d%%", AtrPeriod(), MathMax(InpUAtrPercent, 0)));
    return("Fix Pip");
   }
 
@@ -1330,6 +1370,7 @@ void CreateNewsVLine(const string name, const datetime t, const color clr,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   PacObjLog("vline", name, t, 0.0, tip + " clr=" + ColorToString(clr, true));
   }
 
 //+------------------------------------------------------------------+
@@ -1378,6 +1419,7 @@ void CreateNewsLabel(const string name, const datetime t, const string text, con
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, text);
+   PacObjLog("label", name, t, NewsLabelPrice(t), text + " clr=" + ColorToString(clr, true));
   }
 
 //+------------------------------------------------------------------+
@@ -1549,7 +1591,7 @@ int OnInit()
 
    if(UUsesAtr())
      {
-      g_atrHandle = iATR(_Symbol, UAtrTimeframe(), U_ATR_PERIOD);
+      g_atrHandle = iATR(_Symbol, UAtrTimeframe(), AtrPeriod());
       if(g_atrHandle == INVALID_HANDLE)
          if(ChartVisualsOn()) Print("PAC: gagal membuat handle ATR, fallback ke pip tetap.");
      }
@@ -1580,6 +1622,10 @@ int OnInit()
       if(ChartVisualsOn()) Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
    if(InpTpAdaptive)
       if(ChartVisualsOn()) Print("PAC TP adaptif ON: TP bisa menyempit ke zona standby terdekat, tidak pernah melebar.");
+   if(PivotKetatOn())
+      if(ChartVisualsOn()) Print("PAC Mode Pivot Ketat ON: 2 sewarna + Open vs Close di kiri dan kanan acuan.");
+   if(InpDebugChartObj)
+      if(ChartVisualsOn()) Print("PAC debug objek chart ON: tiap objek yang digambar dicatat di Jurnal (garis jam/news jauh di luar lookback dilewati).");
    {
       const double u0 = ComputeU();
       if(ChartVisualsOn()) Print("PAC U (Anchor->Entry) sumber: ", USourceText(), ", saat ini = ",
@@ -1667,6 +1713,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //+------------------------------------------------------------------+
 void ScanAndDraw()
   {
+   if(InpDebugChartObj && ChartVisualsOn())
+      Print("PAC obj ==== ", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), " ====");
    ScanPivots();
    ScanBases();
    ScanSrZones();
@@ -1791,6 +1839,57 @@ bool AutoPairZones(const double atap, const double lantai, const double u)
   }
 
 //+------------------------------------------------------------------+
+bool PivotLeftOk(const MqlRates &rates[], const int cand, const bool isBuy)
+  {
+   if(cand < 1)
+      return(false);
+   int found = 0;
+   for(int j = cand - 1; j >= 0; j--)
+     {
+      if(isBuy)
+        {
+         if(rates[j].low < rates[cand].low)
+            return(false);
+         if(IsGreen(rates[j]) && rates[j].open > rates[cand].close)
+           {
+            found++;
+            if(found >= 2)
+               return(true);
+           }
+        }
+      else
+        {
+         if(rates[j].high > rates[cand].high)
+            return(false);
+         if(IsRed(rates[j]) && rates[j].open < rates[cand].close)
+           {
+            found++;
+            if(found >= 2)
+               return(true);
+           }
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool TrySetPivotCand(const MqlRates &rates[], const int i, const bool isBuy,
+                     int &cand, int &count, datetime &conf1)
+  {
+   if(PivotKetatOn() && !PivotLeftOk(rates, i, isBuy))
+     {
+      cand  = -1;
+      count = 0;
+      conf1 = 0;
+      return(false);
+     }
+   cand  = i;
+   count = 0;
+   conf1 = 0;
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
 void AddPivot(const MqlRates &bar, const ENUM_PIVOT_TYPE type,
               const datetime c1, const datetime c2)
   {
@@ -1834,11 +1933,7 @@ void ScanPivots()
       if(buyCand >= 0)
         {
          if(rates[i].low < rates[buyCand].low)
-           {
-            buyCand   = i;
-            buyGreens = 0;
-            buyConf1  = 0;
-           }
+            TrySetPivotCand(rates, i, true, buyCand, buyGreens, buyConf1);
          else if(IsGreen(rates[i]) && rates[i].open > rates[buyCand].close)
            {
             buyGreens++;
@@ -1854,21 +1949,13 @@ void ScanPivots()
            }
         }
       if(buyCand < 0 && rates[i].low < rates[i - 1].low)
-        {
-         buyCand   = i;
-         buyGreens = 0;
-         buyConf1  = 0;
-        }
+         TrySetPivotCand(rates, i, true, buyCand, buyGreens, buyConf1);
 
       //--- Pivot Sell: cermin dari Buy
       if(sellCand >= 0)
         {
          if(rates[i].high > rates[sellCand].high)
-           {
-            sellCand  = i;
-            sellReds  = 0;
-            sellConf1 = 0;
-           }
+            TrySetPivotCand(rates, i, false, sellCand, sellReds, sellConf1);
          else if(IsRed(rates[i]) && rates[i].open < rates[sellCand].close)
            {
             sellReds++;
@@ -1884,11 +1971,7 @@ void ScanPivots()
            }
         }
       if(sellCand < 0 && rates[i].high > rates[i - 1].high)
-        {
-         sellCand  = i;
-         sellReds  = 0;
-         sellConf1 = 0;
-        }
+         TrySetPivotCand(rates, i, false, sellCand, sellReds, sellConf1);
      }
   }
 
@@ -2190,6 +2273,16 @@ bool RangesOverlap(const double aHi, const double aLo, const double bHi, const d
   }
 
 //+------------------------------------------------------------------+
+//| Pivot di jendela PAC terbuka: setelah Base, sampai cat penuh.   |
+//| Candle penutup cat (zone.right) masih dihitung. Setelah itu     |
+//| pivot di area harga yang sama = fresh, bukan sentuhan zona ini. |
+//+------------------------------------------------------------------+
+bool PivotInOpenPacWindow(const Pivot &p, const SrZone &z)
+  {
+   return(p.time > z.lastBase && p.time <= z.right);
+  }
+
+//+------------------------------------------------------------------+
 void MarkControls()
   {
    const int nz = ArraySize(g_zones);
@@ -2206,7 +2299,7 @@ void MarkControls()
         {
          if(g_pivots[p].type != need)
             continue;
-         if(g_pivots[p].time <= g_zones[z].lastBase)
+         if(!PivotInOpenPacWindow(g_pivots[p], g_zones[z]))
             continue;
          if(!RangesOverlap(g_pivots[p].high, g_pivots[p].low,
                            g_zones[z].high, g_zones[z].low))
@@ -2232,9 +2325,10 @@ bool PivotHitsAnchor(const Pivot &p)
      {
       if(g_zones[z].isSupport != isBuy)
          continue;
-      if(p.time <= g_zones[z].lastBase)
+      if(!PivotInOpenPacWindow(p, g_zones[z]))
          continue;
-      // Paket C: masuk kotak zona (overlap + toleransi) — termasuk zona kadaluarsa/Control Off.
+      // Overlap High-Low — termasuk zona kadaluarsa/Control Off, selama
+      // masih di dalam jendela cat (sampai zone.right).
       if(p.low <= g_zones[z].high + eps && p.high >= g_zones[z].low - eps)
          return(true);
      }
@@ -2326,6 +2420,11 @@ void CreateArrow(const Pivot &p, const double gap)
                                 DoubleToString(p.close, _Digits),
                                 TimeToString(p.confirm1, TIME_DATE | TIME_MINUTES),
                                 TimeToString(p.confirm2, TIME_DATE | TIME_MINUTES)));
+   const bool hit = PivotHitsAnchor(p);
+   PacObjLog(isBuy ? "pivot-buy" : "pivot-sell", name, p.time, price,
+             (hit ? "MERAH hit-zona" : "kuning") +
+             " H=" + DoubleToString(p.high, _Digits) +
+             " L=" + DoubleToString(p.low, _Digits));
   }
 
 //+------------------------------------------------------------------+
@@ -2366,6 +2465,9 @@ void CreateBaseLine(const Base &b)
                                 DoubleToString(b.high, _Digits),
                                 DoubleToString(b.low, _Digits),
                                 DoubleToString(b.close, _Digits)));
+   PacObjLog("base", name, b.time, b.close,
+             "H=" + DoubleToString(b.high, _Digits) +
+             " L=" + DoubleToString(b.low, _Digits));
   }
 
 //+------------------------------------------------------------------+
@@ -2386,10 +2488,15 @@ void CreateSrRect(const SrZone &z)
   {
    const bool aktif  = (z.isControl && !z.isWeak);
    const bool off    = (z.isControl && z.isWeak);
-   if(InpChartLiteMode && off)
-      return; // zona kadaluarsa disembunyikan di mode chart ringan
    const string name = (z.isSupport ? PREFIX_SUP : PREFIX_RES) + IntegerToString((long)z.left);
    const string side = z.isSupport ? "Lantai" : "Atap";
+   if(InpChartLiteMode && off)
+     {
+      PacObjLog("skip-off", name, z.left, z.low,
+                side + " Control Off disembunyikan lite H=" +
+                DoubleToString(z.high, _Digits) + " L=" + DoubleToString(z.low, _Digits));
+      return;
+     }
    const int armedRank = ArmedRankForZone(z);
    const bool armed = (armedRank > 0);
    const color zclr = armed ? GroupColor(z.isSupport, armedRank)
@@ -2429,6 +2536,18 @@ void CreateSrRect(const SrZone &z)
                                 TimeToString(z.right, TIME_DATE | TIME_MINUTES),
                                 DoubleToString(z.high, _Digits),
                                 DoubleToString(z.low, _Digits)));
+   string st = "standby";
+   if(armed)
+      st = StringFormat("armed %s%d", z.isSupport ? "B" : "S", armedRank);
+   else if(aktif)
+      st = "aktif";
+   else if(off)
+      st = "off";
+   PacObjLog("zona", name, z.left, z.low,
+             side + " " + st +
+             " H=" + DoubleToString(z.high, _Digits) +
+             " L=" + DoubleToString(z.low, _Digits) +
+             " -> " + TimeToString(z.right, TIME_DATE | TIME_MINUTES));
   }
 
 //+------------------------------------------------------------------+
@@ -2448,6 +2567,7 @@ void CreateLevelLine(const string name, const double price, const color clr, con
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   PacObjLog("hline", name, 0, price, (label == "" ? tip : label));
    if(label == "")
       return;
 
@@ -2468,6 +2588,7 @@ void CreateLevelLine(const string name, const double price, const color clr, con
    ObjectSetInteger(0, lb, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, lb, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, lb, OBJPROP_TOOLTIP, tip);
+   PacObjLog("hline-lb", lb, t, price, label);
   }
 
 //+------------------------------------------------------------------+
@@ -2530,9 +2651,9 @@ void CreateLevelSeg(const string name, const double price, const datetime tFrom,
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   PacObjLog("level", name, t1, price, (label == "" ? tip : label));
    if(label == "")
       return;
-
    datetime tLb = t2 + (datetime)PeriodSeconds();
    const string lb = name + "_LB";
    if(!ObjectCreate(0, lb, OBJ_TEXT, 0, tLb, price))
@@ -2547,6 +2668,7 @@ void CreateLevelSeg(const string name, const double price, const datetime tFrom,
    ObjectSetInteger(0, lb, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, lb, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
    ObjectSetString(0, lb, OBJPROP_TOOLTIP, tip);
+   PacObjLog("level-lb", lb, tLb, price, label);
   }
 
 //+------------------------------------------------------------------+

@@ -18,12 +18,16 @@
 4. **Syarat 2 candle hijau konfirmasi**: Open dari KEDUA candle hijau tersebut harus berada **di atas Close** candle acuan.
 5. Jika semua syarat terpenuhi → candle acuan sah menjadi **Pivot Buy**.
 
+**Mode Pivot Ketat** (`InpPivotMode` = Ketat, default): kiri acuan memakai aturan yang sama dengan kanan. Candle hanya jadi kandidat jika **sudah** ada 2 hijau di kirinya (Open di atas Close acuan, boleh diselingi). Mundur dari candle sebelum acuan; jika ketemu Low lebih rendah dari acuan sebelum terkumpul 2 hijau → gagal, bukan kandidat (acuan lama yang terpecah juga dibuang). Kanan tetap 2 hijau seperti di atas. Longgar = hanya konfirmasi kanan (perilaku lama).
+
 ### 1.2 Pivot Sell (kebalikan persis dari Pivot Buy)
 1. Candle acuan: **High lebih tinggi** dari High candle sebelumnya.
 2. Cari 2 candle **merah** konfirmasi (boleh diselingi candle hijau).
 3. Candle selingan hijau: High-nya **tidak boleh** lebih tinggi dari High candle acuan. Jika lebih tinggi → jadi kandidat pivot baru, reset hitungan.
 4. Open kedua candle merah konfirmasi harus **di bawah Close** candle acuan.
 5. Jika terpenuhi → sah menjadi **Pivot Sell**.
+
+Mode Pivot Ketat: 2 merah kiri (Open di bawah Close acuan, boleh diselingi, berhenti jika High lebih tinggi dari acuan) sebelum hitung 2 merah kanan.
 
 ---
 
@@ -66,12 +70,14 @@ RBD dan DBR **tidak** dipakai. Tinggi zona = Low terendah–High tertinggi selur
 5. Kotak berhenti di candle pertama yang membuat cat **nyambung** dari Low sampai High zona (toleransi 1 point). Jika belum penuh, tepi kanan = candle terakhir di window scan.
 
 ### 2.4 Control = zona + overlap Pivot
-Zona di 2.3 sah menjadi **Control** jika ada Pivot **di sebelah kanan Base terakhir grup** (waktu Pivot > waktu Base terakhir) yang range High–Low-nya (termasuk wick) **overlap** dengan tinggi zona, walau hanya 0.1 pip:
+Zona di 2.3 sah menjadi **Control** jika ada Pivot **di sebelah kanan Base terakhir grup** (waktu Pivot > waktu Base terakhir) **dan tidak setelah cat zona penuh** (waktu Pivot ≤ tepi kanan kotak / candle penutup cat, inklusif) yang range High–Low-nya (termasuk wick) **overlap** dengan tinggi zona, walau hanya 0.1 pip:
 
 - Zona **support** (mulai RBR) + **Pivot Buy** overlap → Control (calon **Lantai**)
 - Zona **resisten** (mulai DBD) + **Pivot Sell** overlap → Control (calon **Atap**)
 
 Overlap: `Pivot.Low ≤ Zona.High` DAN `Pivot.High ≥ Zona.Low`.
+
+Pivot **setelah** candle penutup cat (section 2.3) **fresh**: tidak mengaktifkan Control, tidak menambah sentuhan, tag kuning — meski harganya masih di High–Low zona. Candle penutup cat sendiri masih dihitung. Jika cat belum nutup penuh, overlap tetap dihitung seperti sebelumnya.
 
 Zona tanpa Pivot overlap **bukan** Control Aktif — digambar sebagai **Control Standby**, tidak dipakai Atap/Lantai/order.
 
