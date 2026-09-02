@@ -94,7 +94,7 @@ input ENUM_DETECTION_TF InpDetectionTF = TF_AUTO;         // TF Pivot & Base
 input int               InpLookback       = 600;             // Jml bar scan
 input int               InpMaxBaseCandles = 10;              // Maks candle Base per zona
 input ENUM_PIVOT_MARK   InpPivotSymbol = MARK_LOZENGE_SM; // Pivot - Style Tag
-input int               InpGapPips     = 5;               // Pivot - Offset Tag (pips)
+input int               InpGapPips     = 0;               // Pivot - Offset Tag (pips)
 input color             InpPivotColor  = clrYellow;       // Pivot - Warna Tag
 input color             InpBaseColor   = clrWhite;        // Base - Warna Candle
 input color             InpSupportColor = clrForestGreen; // RBR - Warna Zona
@@ -306,6 +306,7 @@ bool             g_vizPaired    = false;
 double           g_vizU         = 0.0;
 ulong            g_processedDeals[];
 bool             g_inRefresh = false;
+bool             g_drawingPivots = false;
 string           g_clccGroup = "";
 double           g_clccCl[];   // lantai/atap zona yang sudah CLCC
 bool             g_clccBuy[];
@@ -1673,12 +1674,12 @@ void ScanAndDraw()
    MarkControls();
    ApplyClccToZones();
    ApplyTpAdaptive();
-   DrawPivots();
    DrawBases();
    DrawAtapLantai();
    RefreshChartVisuals();
    DrawNewsMarks();
    DrawHourMarks();
+   DrawPivots();
   }
 
 //+------------------------------------------------------------------+
@@ -1700,12 +1701,10 @@ bool IsRally(const MqlRates &r) { return(IsGreen(r) && IsImpulse(r)); }
 bool IsDrop(const MqlRates &r)  { return(IsRed(r) && IsImpulse(r)); }
 
 //+------------------------------------------------------------------+
-int PivotArrowCode(const bool isBuy)
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
-   int code = (int)InpPivotSymbol;
-   if(!isBuy && (InpPivotSymbol == MARK_ARROW || InpPivotSymbol == MARK_TRIANGLE))
-      code++;
-   return(code);
+   if(id == CHARTEVENT_CHART_CHANGE)
+      DrawPivots();
   }
 
 //+------------------------------------------------------------------+
@@ -2224,10 +2223,65 @@ void MarkControls()
   }
 
 //+------------------------------------------------------------------+
+bool PivotHitsAnchor(const Pivot &p)
+  {
+   const bool isBuy = (p.type == PIVOT_BUY);
+   const double eps = MathMax(PipSize() * 0.25, _Point);
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport != isBuy)
+         continue;
+      if(p.time <= g_zones[z].lastBase)
+         continue;
+      // Paket C: masuk kotak zona (overlap + toleransi) — termasuk zona kadaluarsa/Control Off.
+      if(p.low <= g_zones[z].high + eps && p.high >= g_zones[z].low - eps)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+int PivotArrowCode(const bool isBuy)
+  {
+   int code = (int)InpPivotSymbol;
+   if(!isBuy && (InpPivotSymbol == MARK_ARROW || InpPivotSymbol == MARK_TRIANGLE))
+      code++;
+   return(code);
+  }
+
+//+------------------------------------------------------------------+
+int PivotGlyphPadPx()
+  {
+   if(InpPivotSymbol == MARK_ARROW || InpPivotSymbol == MARK_TRIANGLE)
+      return(1);
+   if(InpPivotSymbol == MARK_DOT)
+      return(2);
+   return(3);
+  }
+
+//+------------------------------------------------------------------+
+double PivotMarkPrice(const bool isBuy, const datetime t, const double wick)
+  {
+   int x = 0, y = 0;
+   if(!ChartTimePriceToXY(0, 0, t, wick, x, y))
+      return(wick);
+   const int pad = PivotGlyphPadPx();
+   const int yObj = isBuy ? (y - pad) : (y + pad);
+   int sub = 0;
+   datetime td = 0;
+   double pr = 0.0;
+   if(!ChartXYToTimePrice(0, x, yObj, sub, td, pr) || pr <= 0.0)
+      return(wick);
+   return(pr);
+  }
+
+//+------------------------------------------------------------------+
 void DrawPivots()
   {
-   if(!ChartVisualsOn())
+   if(!ChartVisualsOn() || g_drawingPivots)
       return;
+   g_drawingPivots = true;
    ObjectsDeleteAll(0, PREFIX_PB);
    ObjectsDeleteAll(0, PREFIX_PS);
 
@@ -2235,6 +2289,8 @@ void DrawPivots()
    const int n = ArraySize(g_pivots);
    for(int i = 0; i < n; i++)
       CreateArrow(g_pivots[i], gap);
+   ChartRedraw(0);
+   g_drawingPivots = false;
   }
 
 //+------------------------------------------------------------------+
@@ -2242,16 +2298,20 @@ void CreateArrow(const Pivot &p, const double gap)
   {
    const bool isBuy = (p.type == PIVOT_BUY);
    const string name = (isBuy ? PREFIX_PB : PREFIX_PS) + IntegerToString((long)p.time);
-   const double price = isBuy ? (p.low - gap) : (p.high + gap);
+   const double wick = isBuy ? p.low : p.high;
+   double price = PivotMarkPrice(isBuy, p.time, wick);
+   if(gap > 0.0)
+      price = isBuy ? (price - gap) : (price + gap);
 
    if(!ObjectCreate(0, name, OBJ_ARROW, 0, p.time, price))
       return;
 
    ObjectSetInteger(0, name, OBJPROP_ARROWCODE, PivotArrowCode(isBuy));
    ObjectSetInteger(0, name, OBJPROP_ANCHOR, isBuy ? ANCHOR_TOP : ANCHOR_BOTTOM);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, InpPivotColor);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, PivotHitsAnchor(p) ? clrRed : InpPivotColor);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 100);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
@@ -4855,6 +4915,7 @@ void ApplyPivotCapAndSlots()
    CancelStalePendings(buyIdx, nBuy, sellIdx, nSell);
    DropStaleTpBatches(buyIdx, nBuy, sellIdx, nSell);
    RefreshChartVisuals();
+   DrawPivots();
   }
 
 //+------------------------------------------------------------------+
