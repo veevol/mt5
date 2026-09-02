@@ -4,7 +4,7 @@
 //|  Reentry setelah TP. CLCC close candle, bukan SL sentuh.         |
 //+------------------------------------------------------------------+
 #property copyright "PAC Auto Entry"
-#property version   "1.10"
+#property version   "1.11"
 #property description "PAC Auto Entry — Pivot, Base, Control, pending, CLCC, reentry"
 
 #include <Trade/Trade.mqh>
@@ -97,14 +97,14 @@ enum ENUM_DETECTION_TF
 //+------------------------------------------------------------------+
 input group "=== Deteksi ==="
 input ENUM_DETECTION_TF InpDetectionTF   = TF_AUTO;          // TF Pivot & Base
-input int               InpLookback       = 600;             // Jml bar scan
+input int               InpLookback       = 300;             // Jml bar scan
 input int               InpMaxBaseCandles = 10;              // Maks candle Base per zona
 input ENUM_PIVOT_MODE   InpPivotMode      = PIVOT_MODE_KETAT; // Mode Pivot
 
 input group "=== Area ==="
-input ENUM_U_MODE InpUMode         = U_FIXED_PIPS; // Sumber
+input ENUM_U_MODE InpUMode         = U_ATR_CURRENT; // Sumber
 input int         InpUPips         = 150;          // U - Pip Tetap
-input int         InpUAtrPercent   = 100;          // U - ATR
+input int         InpUAtrPercent   = 300;          // U - ATR
 input int         InpAtrPeriod     = 14;           // ATR Periode
 input int         InpCLPercentArea = 30;          // Anchor -> CL
 input int         InpTPPercentArea = 200;          // Anchor -> TP
@@ -113,20 +113,20 @@ input bool        InpTpAdaptive    = true;         // TP Adaptif
 
 input group "=== Order ==="
 input double InpLot              = 0.01; // Lot Dasar
-input int    InpLayerCount       = 3;    // Jml Layer
+input int    InpLayerCount       = 1;    // Jml Layer
 input bool   InpLotStepUp        = true;  // Lot bertingkat
 input int    InpMaxPivotTouches  = 4;    // Maks sentuhan pivot
-input int    InpMaxGroupsPerSide = 1;    // Maks grup per arah
+input int    InpMaxGroupsPerSide = 2;    // Maks grup per arah
 input int    InpMaxReentry       = 3;    // Maks reentry grup after TP
 input bool   InpAutoPasangan     = true;  // Auto Pasangan
 
 input group "=== Filter ==="
 input ENUM_HOUR_FILTER InpHourFilter = HOUR_CANCEL_PENDING; // Filter Jam
 input ENUM_NEWS_FILTER InpNewsFilter = NEWS_60_60;          // Filter News
-input ENUM_DAY_FILTER  InpDayFilter  = DAY_FILTER_OFF;     // Filter Hari
+input ENUM_DAY_FILTER  InpDayFilter  = DAY_THURSDAY;      // Filter Hari
 
 input group "=== Chart On Tester ==="
-input bool InpChartLiteMode  = false; // Sembunyikan zona kadaluarsa
+input bool InpChartLiteMode  = true;  // Sembunyikan zona kadaluarsa
 input bool InpDebugChartObj = false; // Log tiap object
 
 // Disembunyikan dari dialog; nilai tetap dipakai kode.
@@ -1429,11 +1429,27 @@ void DeleteNewsMarks()
   }
 
 //+------------------------------------------------------------------+
+void FilterMarkTimeRange(datetime &from, datetime &to)
+  {
+   const int bars = iBars(_Symbol, PERIOD_CURRENT);
+   const int lb = MathMax(InpLookback, 50);
+   int sh = lb;
+   if(bars > 1)
+      sh = (int)MathMin(lb, bars - 1);
+   from = (sh >= 0) ? iTime(_Symbol, PERIOD_CURRENT, sh) : 0;
+   if(from <= 0)
+      from = TimeCurrent() - (datetime)lb * PeriodSeconds(PERIOD_CURRENT);
+   to = TimeCurrent() + 86400;
+  }
+
+//+------------------------------------------------------------------+
 void DrawNewsMarks()
   {
    DeleteNewsMarks();
    if(!NewsFilterOn() || !ChartVisualsOn())
       return;
+   datetime from = 0, to = 0;
+   FilterMarkTimeRange(from, to);
    int beforeMin = 0, afterMin = 0;
    NewsWindowMins(beforeMin, afterMin);
    const int before = beforeMin * 60;
@@ -1447,6 +1463,8 @@ void DrawNewsMarks()
       const string major = NewsMajorText(i);
       const datetime tOn  = UtcToHfmChart(utc - before);
       const datetime tOff = UtcToHfmChart(utc + after);
+      if(tOff < from || tOn > to)
+         continue;
       const string id = IntegerToString(i);
       const color clr = FilterMarkColor(NEWS_CLR, NEWS_CLR_PAST, tOff);
       CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, clr, STYLE_DASH,
@@ -1464,19 +1482,15 @@ void DeleteHourMarks()
   }
 
 //+------------------------------------------------------------------+
-//| Gambar garis vertikal utk tiap jendela filter jam, diulang tiap  |
-//| hari WIB dari bar tertua yang termuat sampai 7 hari ke depan.    |
+//| Gambar garis jam hanya di jendela lookback (+1 hari ke depan).  |
 //+------------------------------------------------------------------+
 void DrawHourMarks()
   {
    DeleteHourMarks();
    if(!HourFilterOn() || !ChartVisualsOn())
       return;
-   const int totalBars = iBars(_Symbol, PERIOD_CURRENT);
-   if(totalBars <= 1)
-      return;
-   const datetime rangeStartServer = iTime(_Symbol, PERIOD_CURRENT, totalBars - 1);
-   const datetime rangeEndServer   = TimeCurrent() + 7 * 86400;
+   datetime rangeStartServer = 0, rangeEndServer = 0;
+   FilterMarkTimeRange(rangeStartServer, rangeEndServer);
    if(rangeStartServer <= 0 || rangeEndServer <= rangeStartServer)
       return;
 
@@ -1494,6 +1508,8 @@ void DrawHourMarks()
          const datetime tOffWib = dayWib + g_hourWindows[w].endMin   * 60 + 60;
          const datetime tOnServer  = WibToServer(tOnWib);
          const datetime tOffServer = WibToServer(tOffWib);
+         if(tOffServer < rangeStartServer || tOnServer > rangeEndServer)
+            continue;
          const string id = IntegerToString(idx++);
          const color clr = FilterMarkColor(HOUR_CLR, HOUR_CLR_PAST, tOffServer);
          CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, clr, STYLE_DASH,
@@ -1637,6 +1653,7 @@ int OnInit()
    ScanAndDraw();
    g_lastBarTime = iTime(_Symbol, g_usedTF, 0);
    ManageOrders();
+   PaintChart();
    if(ChartVisualsOn())
      {
       if(!EventSetTimer(1))
@@ -1700,6 +1717,9 @@ void OnTick()
       ApplyPivotCapAndSlots();
    ProcessTpBatches();
    g_inRefresh = false;
+
+   if(newBar)
+      PaintChart();
   }
 
 //+------------------------------------------------------------------+
@@ -1724,10 +1744,6 @@ void ScanAndDraw()
    ApplyTpAdaptive();
    DrawBases();
    DrawAtapLantai();
-   RefreshChartVisuals();
-   DrawNewsMarks();
-   DrawHourMarks();
-   DrawPivots();
   }
 
 //+------------------------------------------------------------------+
@@ -1752,7 +1768,12 @@ bool IsDrop(const MqlRates &r)  { return(IsRed(r) && IsImpulse(r)); }
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
    if(id == CHARTEVENT_CHART_CHANGE)
+     {
+      if(MQLInfoInteger(MQL_TESTER) != 0)
+         return;
       DrawPivots();
+      ChartRedraw(0);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -2357,6 +2378,8 @@ int PivotGlyphPadPx()
 //+------------------------------------------------------------------+
 double PivotMarkPrice(const bool isBuy, const datetime t, const double wick)
   {
+   if(MQLInfoInteger(MQL_TESTER) != 0)
+      return(wick);
    int x = 0, y = 0;
    if(!ChartTimePriceToXY(0, 0, t, wick, x, y))
       return(wick);
@@ -2383,7 +2406,6 @@ void DrawPivots()
    const int n = ArraySize(g_pivots);
    for(int i = 0; i < n; i++)
       CreateArrow(g_pivots[i], gap);
-   ChartRedraw(0);
    g_drawingPivots = false;
   }
 
@@ -3434,6 +3456,27 @@ void RefreshChartVisuals()
    FillVizGroups();
    DrawSrZones();
    DrawArmedVisuals();
+  }
+
+//+------------------------------------------------------------------+
+void PaintChart()
+  {
+   if(!ChartVisualsOn())
+      return;
+   RefreshChartVisuals();
+   DrawNewsMarks();
+   DrawHourMarks();
+   DrawPivots();
+   ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+void PaintArmedVisuals()
+  {
+   if(!ChartVisualsOn())
+      return;
+   RefreshChartVisuals();
+   DrawPivots();
    ChartRedraw(0);
   }
 
@@ -5036,8 +5079,6 @@ void ApplyPivotCapAndSlots()
    BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
    CancelStalePendings(buyIdx, nBuy, sellIdx, nSell);
    DropStaleTpBatches(buyIdx, nBuy, sellIdx, nSell);
-   RefreshChartVisuals();
-   DrawPivots();
   }
 
 //+------------------------------------------------------------------+
@@ -5064,6 +5105,7 @@ void ManageOrders()
    ApplyPivotCapAndSlots();
    ProcessTpBatches();
    g_inRefresh = false;
+   PaintArmedVisuals();
   }
 
 //+------------------------------------------------------------------+
