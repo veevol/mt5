@@ -1,0 +1,5312 @@
+//+------------------------------------------------------------------+
+//|                                                  PAC Breakout.mq5 |
+//|     PAC Breakout — Pivot + Base + Control, pending breakout      |
+//|  Buy stop di atas Atap. Sell stop di bawah Lantai.               |
+//|  Reentry setelah TP. CLCC close candle, bukan SL sentuh.         |
+//+------------------------------------------------------------------+
+#property copyright "PAC Breakout"
+#property version   "1.00"
+#property description "PAC Breakout — Buy di atas Atap, Sell di bawah Lantai"
+
+#include <Trade/Trade.mqh>
+
+//+------------------------------------------------------------------+
+//| TYPES                                                            |
+//+------------------------------------------------------------------+
+enum ENUM_PIVOT_TYPE
+  {
+   PIVOT_BUY  = 1,
+   PIVOT_SELL = -1
+  };
+
+enum ENUM_PIVOT_MARK
+  {
+   MARK_LOZENGE_SM = 115, // Belah ketupat kecil
+   MARK_LOZENGE    = 116, // Belah ketupat
+   MARK_DIAMOND    = 117, // Diamond
+   MARK_DIAMOND_SM = 119, // Diamond kecil
+   MARK_DOT        = 159, // Titik
+   MARK_CIRCLE     = 108, // Lingkaran
+   MARK_ARROW      = 233, // Panah atas/bawah
+   MARK_TRIANGLE   = 241  // Segitiga atas/bawah
+  };
+
+enum ENUM_PIVOT_MODE
+  {
+   PIVOT_MODE_KETAT   = 0, // Ketat
+   PIVOT_MODE_LONGGAR = 1  // Longgar
+  };
+
+enum ENUM_HOUR_FILTER
+  {
+   HOUR_FLATTEN_ALL      = 0, // Tutup Semua
+   HOUR_CANCEL_PENDING   = 1, // Hanya Pending
+   HOUR_BLOCK_ENTRY_ONLY = 2, // Blokir Entri Baru
+   HOUR_FILTER_OFF       = 3  // Off Filter
+  };
+
+enum ENUM_NEWS_FILTER
+  {
+   NEWS_60_60      = 0, // 60-60
+   NEWS_30_60      = 1, // 30-60
+   NEWS_30_30      = 2, // 30-30
+   NEWS_FILTER_OFF = 3  // Off Filter
+  };
+
+enum ENUM_DAY_FILTER
+  {
+   DAY_THURSDAY   = 0, // Kamis
+   DAY_FILTER_OFF = 1  // Off Filter
+  };
+
+enum ENUM_U_MODE
+  {
+   U_FIXED_PIPS  = 0, // Fix Pip
+   U_ATR_CURRENT = 1, // ATR Current
+   U_ATR_H1      = 2, // ATR H1
+   U_ATR_D       = 3  // ATR D
+  };
+
+enum ENUM_DETECTION_TF
+  {
+   TF_AUTO = 0,           // Auto
+   TF_M1   = PERIOD_M1,   // 1 Minute
+   TF_M2   = PERIOD_M2,   // 2 Minutes
+   TF_M3   = PERIOD_M3,   // 3 Minutes
+   TF_M4   = PERIOD_M4,   // 4 Minutes
+   TF_M5   = PERIOD_M5,   // 5 Minutes
+   TF_M6   = PERIOD_M6,   // 6 Minutes
+   TF_M10  = PERIOD_M10,  // 10 Minutes
+   TF_M12  = PERIOD_M12,  // 12 Minutes
+   TF_M15  = PERIOD_M15,  // 15 Minutes
+   TF_M20  = PERIOD_M20,  // 20 Minutes
+   TF_M30  = PERIOD_M30,  // 30 Minutes
+   TF_H1   = PERIOD_H1,   // 1 Hour
+   TF_H2   = PERIOD_H2,   // 2 Hours
+   TF_H3   = PERIOD_H3,   // 3 Hours
+   TF_H4   = PERIOD_H4,   // 4 Hours
+   TF_H6   = PERIOD_H6,   // 6 Hours
+   TF_H8   = PERIOD_H8,   // 8 Hours
+   TF_H12  = PERIOD_H12,  // 12 Hours
+   TF_D1   = PERIOD_D1,   // Daily
+   TF_W1   = PERIOD_W1,   // Weekly
+   TF_MN1  = PERIOD_MN1   // Monthly
+  };
+
+//+------------------------------------------------------------------+
+//| INPUTS                                                           |
+//+------------------------------------------------------------------+
+input group "=== Deteksi ==="
+input ENUM_DETECTION_TF InpDetectionTF   = TF_AUTO;          // TF Pivot & Base
+input int               InpLookback       = 300;             // Jml bar scan
+input int               InpMaxBaseCandles = 10;              // Maks candle Base per zona
+input ENUM_PIVOT_MODE   InpPivotMode      = PIVOT_MODE_LONGGAR; // Mode Pivot
+
+input group "=== Area ==="
+input ENUM_U_MODE InpUMode         = U_ATR_H1; // Sumber
+input int         InpUPips         = 200;          // U - Pip Tetap
+input int         InpUAtrPercent   = 190;          // U - ATR
+input int         InpAtrPeriod     = 48;           // ATR Periode
+input int         InpCLPercentArea = 30;          // Anchor -> CL
+input int         InpTPPercentArea = 200;          // Anchor -> TP
+input int         InpSLPercentArea = 300;          // Anchor -> SL
+input bool        InpTpAdaptive    = true;         // TP Adaptif
+
+input group "=== Order ==="
+input double InpLot              = 0.01; // Lot Dasar
+input int    InpLayerCount       = 3;    // Jml Layer
+input bool   InpLotStepUp        = true;  // Lot bertingkat
+input int    InpMaxPivotTouches  = 3;    // Maks sentuhan pivot
+input int    InpMaxGroupsPerSide = 1;    // Maks grup per arah
+input int    InpMaxReentry       = 3;    // Maks reentry grup after TP
+input bool   InpAutoPasangan     = false; // Auto Pasangan (breakout: TP mandiri)
+
+input group "=== Filter ==="
+input ENUM_HOUR_FILTER InpHourFilter = HOUR_BLOCK_ENTRY_ONLY; // Filter Jam
+input ENUM_NEWS_FILTER InpNewsFilter = NEWS_30_30;          // Filter News
+input ENUM_DAY_FILTER  InpDayFilter  = DAY_FILTER_OFF;      // Filter Hari
+
+input group "=== Chart On Tester ==="
+input bool InpChartLiteMode  = true;  // Sembunyikan zona kadaluarsa
+input bool InpDebugChartObj = false; // Log tiap object
+
+// Disembunyikan dari dialog; nilai tetap dipakai kode.
+const ENUM_PIVOT_MARK InpPivotSymbol     = MARK_LOZENGE_SM;
+const int              InpGapPips      = 0;
+const color            InpPivotColor   = clrYellow;
+const color            InpBaseColor    = clrWhite;
+const color            InpSupportColor = clrForestGreen;
+const color            InpResistColor  = clrFireBrick;
+const bool              InpSendOrders      = true;
+const bool              InpAlertOnCL       = false;
+const bool              InpAlertOnReentry  = false;
+
+//+------------------------------------------------------------------+
+//| CONST                                                            |
+//+------------------------------------------------------------------+
+const string PREFIX_PB     = "PAB_PB_";
+const string PREFIX_PS     = "PAB_PS_";
+const string PREFIX_BASE   = "PAB_BASE_";
+const string PREFIX_RBR    = "PAB_RBR_"; // sisa versi lama, dihapus saat init
+const string PREFIX_DBD    = "PAB_DBD_";
+const string PREFIX_SUP    = "PAB_SUP_";
+const string PREFIX_RES    = "PAB_RES_";
+const string PREFIX_ATAP   = "PAB_ATAP";
+const string PREFIX_LANTAI = "PAB_LANTAI";
+const string PREFIX_LV     = "PAB_LV_";
+const string PREFIX_NEWS   = "PAB_NEWS_";
+const color  NEWS_CLR      = clrMediumOrchid;    // ungu - jendela news hidup/akan datang
+const color  NEWS_CLR_PAST = clrPurple;          // ungu tua - jendela news sudah lewat
+const string PREFIX_HOUR   = "PAB_HOUR_";
+const color  HOUR_CLR      = clrDeepSkyBlue;    // biru muda - jendela jam hidup/akan datang
+const color  HOUR_CLR_PAST = clrSteelBlue;      // biru baja - jendela jam sudah lewat
+const double BASE_BODY_RATIO  = 0.5; // |Close-Open| â‰¤ rasio Ã— (High-Low)
+const int    IMPULSE_BODY_PCT = 50;  // Body minimal rally/drop (% dari High-Low)
+const long   InpMagic         = 998; // Magic Number EA PAC Breakout (bukan 0, bukan 999)
+const int    InpDeviation     = 30;
+const int    InpTpWindowMs    = 1000;
+
+struct Pivot
+  {
+   datetime        time;
+   double          open;
+   double          high;
+   double          low;
+   double          close;
+   ENUM_PIVOT_TYPE type;
+   datetime        confirm1;
+   datetime        confirm2;
+  };
+
+struct Base
+  {
+   datetime time;
+   double   open;
+   double   high;
+   double   low;
+   double   close;
+  };
+
+struct SrZone
+  {
+   datetime left;
+   datetime right;
+   datetime lastBase;
+   double   high;
+   double   low;
+   bool     isSupport;
+   bool     isControl;
+   bool     isWeak;
+   datetime pivotTime;
+   int      pivotTouches;
+  };
+
+struct PacCmt
+  {
+   string          groupCode;
+   bool            isBuy;
+   bool            paired;
+   int             layerCount;
+   int             position;
+   ENUM_TIMEFRAMES timeframe;
+   double          clPrice;
+   string          tfText;
+   string          stamp;
+  };
+
+struct LiveItem
+  {
+   ulong           ticket;
+   ulong           positionId;
+   bool            isPosition;
+   string          comment;
+   PacCmt          pac;
+   bool            parsed;
+   double          price;
+   double          sl;
+   double          tp;
+   double          lot;
+   ENUM_ORDER_TYPE orderType;
+   datetime        setupTime;
+  };
+
+struct PacGroup
+  {
+   string          groupCode;
+   ENUM_TIMEFRAMES timeframe;
+   double          clPrice;
+   double          anchor;    // lantai/atap, kunci zona (tidak ikut ATR)
+   string          tfText;
+   int             layerCount;
+   int             direction;
+   datetime        lastCheckedBarTime;
+   int             reentryCount;
+   bool            clExecuted;
+   datetime        startedAt;
+  };
+
+struct Snapshot
+  {
+   ulong  positionId;
+   ulong  ticket;
+   string comment;
+   double entry;
+   double sl;
+   double tp;
+   double lot;
+   bool   isBuy;
+  };
+
+struct TpSlot
+  {
+   bool            isBuy;
+   int             layerCount;
+   int             position;
+   double          clPrice;   // CL terkunci saat TP, untuk CLCC/reentry
+   double          anchor;    // lantai/atap zona, kunci identitas
+   string          stamp;
+  };
+
+struct TpBatch
+  {
+   string groupCode;
+   ulong  windowStartMs;
+   TpSlot slots[];
+  };
+
+struct VizGroup
+  {
+   string   code;
+   bool     isBuy;
+   int      rank;
+   double   anchor;
+   double   entry;
+   double   cl;
+   double   sl;
+   double   tp;
+   datetime tFrom;
+   bool     hasPos1;
+  };
+
+struct LivePosSlot
+  {
+   double anchor;
+   double cl;
+   double entry;
+   int    zoneIdx;
+  };
+
+//+------------------------------------------------------------------+
+//| GLOBALS                                                          |
+//+------------------------------------------------------------------+
+Pivot            g_pivots[];
+Base             g_bases[];
+SrZone           g_zones[];
+datetime         g_lastBarTime = 0;
+ENUM_TIMEFRAMES  g_usedTF      = PERIOD_CURRENT;
+CTrade           g_trade;
+PacGroup         g_groups[];
+Snapshot         g_snaps[];
+TpBatch          g_tpBatches[];
+VizGroup         g_viz[];
+int              g_vizAtapIdx   = -1;
+int              g_vizLantaiIdx = -1;
+bool             g_vizPaired    = false;
+double           g_vizU         = 0.0;
+ulong            g_processedDeals[];
+bool             g_inRefresh = false;
+bool             g_drawingPivots = false;
+string           g_clccGroup = "";
+double           g_clccCl[];   // lantai/atap zona yang sudah CLCC
+bool             g_clccBuy[];
+string           g_lastNewsName = "";
+string           g_lastHourFilterLabel = "";
+datetime         g_newsUtc[];
+string           g_newsName[];
+datetime         g_newsCacheFrom  = 0;
+datetime         g_newsCacheUntil = 0;
+bool             g_newsCacheIn    = false;
+string           g_newsCacheName  = "";
+int              g_atrHandle      = INVALID_HANDLE;
+
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES DetectionTF()
+  {
+   if(InpDetectionTF == TF_AUTO)
+      return((ENUM_TIMEFRAMES)Period());
+   return((ENUM_TIMEFRAMES)InpDetectionTF);
+  }
+
+//+------------------------------------------------------------------+
+//| Satu saklar live + tester visual: objek chart, timer 1s, Print.  |
+//| Optimasi dan tester tanpa tampilan chart = off.                  |
+//+------------------------------------------------------------------+
+bool ChartVisualsOn()
+  {
+   if(MQLInfoInteger(MQL_OPTIMIZATION) != 0)
+      return(false);
+   if(MQLInfoInteger(MQL_TESTER) != 0 && MQLInfoInteger(MQL_VISUAL_MODE) == 0)
+      return(false);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+void PacObjLog(const string kind, const string name, const datetime t,
+                 const double price, const string extra = "")
+  {
+   if(!InpDebugChartObj || !ChartVisualsOn())
+      return;
+   if(t > 0)
+     {
+      const int sh = iBarShift(_Symbol, PERIOD_CURRENT, t, false);
+      if(sh > MathMax(InpLookback, 50))
+         return;
+     }
+   string msg = "PAC obj " + kind + " " + name;
+   if(t > 0)
+      msg += " t=" + TimeToString(t, TIME_DATE | TIME_MINUTES);
+   if(price > 0.0)
+      msg += " p=" + DoubleToString(price, _Digits);
+   if(extra != "")
+      msg += " " + extra;
+   Print(msg);
+  }
+
+//+------------------------------------------------------------------+
+bool UUsesAtr()
+  {
+   return(InpUMode != U_FIXED_PIPS);
+  }
+
+int AtrPeriod()
+  {
+   return(MathMax(InpAtrPeriod, 1));
+  }
+
+bool PivotKetatOn()
+  {
+   return(InpPivotMode == PIVOT_MODE_KETAT);
+  }
+
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES UAtrTimeframe()
+  {
+   if(InpUMode == U_ATR_H1)
+      return(PERIOD_H1);
+   if(InpUMode == U_ATR_D)
+      return(PERIOD_D1);
+   return(DetectionTF());
+  }
+
+//+------------------------------------------------------------------+
+string USourceText()
+  {
+   if(InpUMode == U_ATR_CURRENT)
+      return(StringFormat("ATR Current(%d) x %d%%", AtrPeriod(), MathMax(InpUAtrPercent, 0)));
+   if(InpUMode == U_ATR_H1)
+      return(StringFormat("ATR H1(%d) x %d%%", AtrPeriod(), MathMax(InpUAtrPercent, 0)));
+   if(InpUMode == U_ATR_D)
+      return(StringFormat("ATR D(%d) x %d%%", AtrPeriod(), MathMax(InpUAtrPercent, 0)));
+   return("Fix Pip");
+  }
+
+//+------------------------------------------------------------------+
+//| News USD+EUR, jam UTC. Investing high-impact + daftar dipertahan  |
+//| (Trump, Oil Inv, Claims, S&P/Chicago PMI, Homes, Durable).       |
+//| Event jam sama digabung labelnya. Cakupan 1 Jan 2025-31 Des 2026.|
+//+------------------------------------------------------------------+
+int NewsCount()
+  {
+   return(ArraySize(g_newsUtc));
+  }
+
+//+------------------------------------------------------------------+
+datetime NewsTimeUtc(const int i)
+  {
+   if(i < 0 || i >= ArraySize(g_newsUtc))
+      return(0);
+   return(g_newsUtc[i]);
+  }
+
+//+------------------------------------------------------------------+
+string NewsLabel(const int i)
+  {
+   if(i < 0 || i >= ArraySize(g_newsName))
+      return("");
+   return(g_newsName[i]);
+  }
+
+//+------------------------------------------------------------------+
+string NewsMajorText(const int i)
+  {
+   const string n = NewsLabel(i);
+   if(n == "")
+      return("");
+   return("Major: " + n);
+  }
+
+//+------------------------------------------------------------------+
+datetime AlignNewsTime(const datetime t)
+  {
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   if(dt.min == 59)
+      return(t + 60);
+   return(t);
+  }
+
+//+------------------------------------------------------------------+
+int NewsTimeScore(const datetime t)
+  {
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   int s = 0;
+   if(dt.min == 0 || dt.min == 15 || dt.min == 30 || dt.min == 45)
+      s += 2;
+   if(dt.min % 5 == 0)
+      s += 1;
+   return(s);
+  }
+
+//+------------------------------------------------------------------+
+void AddNews(datetime t, const string name)
+  {
+   if(t <= 0 || name == "")
+      return;
+   t = AlignNewsTime(t);
+   const int n = ArraySize(g_newsUtc);
+   for(int i = 0; i < n; i++)
+     {
+      if(MathAbs((long)g_newsUtc[i] - (long)t) > 60)
+         continue;
+      if(StringFind(g_newsName[i], name) < 0)
+        {
+         if(g_newsName[i] == "")
+            g_newsName[i] = name;
+         else
+            g_newsName[i] += " / " + name;
+        }
+      if(NewsTimeScore(t) > NewsTimeScore(g_newsUtc[i]))
+         g_newsUtc[i] = t;
+      return;
+     }
+   ArrayResize(g_newsUtc, n + 1);
+   ArrayResize(g_newsName, n + 1);
+   g_newsUtc[n]  = t;
+   g_newsName[n] = name;
+  }
+
+//+------------------------------------------------------------------+
+void InvalidateNewsCache()
+  {
+   g_newsCacheFrom  = 0;
+   g_newsCacheUntil = 0;
+   g_newsCacheIn    = false;
+   g_newsCacheName  = "";
+  }
+
+//+------------------------------------------------------------------+
+bool NewsFilterOn() { return(InpNewsFilter != NEWS_FILTER_OFF); }
+bool HourFilterOn() { return(InpHourFilter != HOUR_FILTER_OFF); }
+bool DayFilterOn()  { return(InpDayFilter == DAY_THURSDAY); }
+
+//+------------------------------------------------------------------+
+void NewsWindowMins(int &beforeMin, int &afterMin)
+  {
+   beforeMin = 0;
+   afterMin  = 0;
+   if(InpNewsFilter == NEWS_60_60)
+     {
+      beforeMin = 60;
+      afterMin  = 60;
+     }
+   else if(InpNewsFilter == NEWS_30_60)
+     {
+      beforeMin = 30;
+      afterMin  = 60;
+     }
+   else if(InpNewsFilter == NEWS_30_30)
+     {
+      beforeMin = 30;
+      afterMin  = 30;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void RefreshNewsCache(const datetime now)
+  {
+   g_newsCacheFrom  = now;
+   g_newsCacheUntil = now + 86400;
+   g_newsCacheIn    = false;
+   g_newsCacheName  = "";
+   int beforeMin = 0, afterMin = 0;
+   NewsWindowMins(beforeMin, afterMin);
+   const int before = beforeMin * 60;
+   const int after  = afterMin * 60;
+   const int n = NewsCount();
+   datetime nextOn = 0;
+   for(int i = 0; i < n; i++)
+     {
+      const datetime utc = NewsTimeUtc(i);
+      if(utc <= 0)
+         continue;
+      const datetime tOn  = UtcToHfmChart(utc - before);
+      const datetime tOff = UtcToHfmChart(utc + after);
+      if(now >= tOn && now <= tOff)
+        {
+         g_newsCacheUntil = tOff + 1;
+         g_newsCacheIn    = true;
+         g_newsCacheName  = NewsMajorText(i);
+         return;
+        }
+      if(tOn > now && (nextOn == 0 || tOn < nextOn))
+         nextOn = tOn;
+     }
+   if(nextOn > now)
+      g_newsCacheUntil = nextOn;
+  }
+
+//+------------------------------------------------------------------+
+void InitNewsCalendar()
+  {
+   InvalidateNewsCache();
+   ArrayResize(g_newsUtc, 0);
+   ArrayResize(g_newsName, 0);
+   AddNews(D'2025.01.02 13:30:00', "Claims");
+   AddNews(D'2025.01.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.01.03 15:00:00', "ISM Mfg");
+   AddNews(D'2025.01.06 14:45:00', "S&P Svc PMI");
+   AddNews(D'2025.01.07 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.01.07 15:00:00', "ISM Svc / JOLTS");
+   AddNews(D'2025.01.08 13:15:00', "ADP");
+   AddNews(D'2025.01.08 15:30:00', "Oil Inv");
+   AddNews(D'2025.01.09 13:30:00', "Claims");
+   AddNews(D'2025.01.10 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.01.14 13:30:00', "PPI");
+   AddNews(D'2025.01.15 13:30:00', "CPI / Core CPI");
+   AddNews(D'2025.01.15 15:30:00', "Oil Inv");
+   AddNews(D'2025.01.16 13:30:00', "Retail Sales / Claims");
+   AddNews(D'2025.01.20 17:00:00', "Trump");
+   AddNews(D'2025.01.22 15:30:00', "Oil Inv");
+   AddNews(D'2025.01.23 13:30:00', "Claims");
+   AddNews(D'2025.01.24 14:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.01.24 15:00:00', "Existing Homes");
+   AddNews(D'2025.01.27 15:00:00', "New Homes");
+   AddNews(D'2025.01.28 13:30:00', "Durable Goods");
+   AddNews(D'2025.01.28 15:00:00', "CB Confidence");
+   AddNews(D'2025.01.29 15:30:00', "Oil Inv");
+   AddNews(D'2025.01.29 19:00:00', "FOMC");
+   AddNews(D'2025.01.29 19:30:00', "FOMC Press");
+   AddNews(D'2025.01.30 12:15:00', "ECB Rate");
+   AddNews(D'2025.01.30 12:45:00', "ECB Press");
+   AddNews(D'2025.01.30 13:30:00', "GDP / Claims");
+   AddNews(D'2025.01.31 13:00:00', "DE CPI Prel");
+   AddNews(D'2025.01.31 13:30:00', "PCE / Core PCE");
+   AddNews(D'2025.01.31 14:45:00', "Chicago PMI");
+   AddNews(D'2025.02.03 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.02.03 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.02.03 15:00:00', "ISM Mfg");
+   AddNews(D'2025.02.04 15:00:00', "JOLTS");
+   AddNews(D'2025.02.05 13:15:00', "ADP");
+   AddNews(D'2025.02.05 14:45:00', "S&P Svc PMI");
+   AddNews(D'2025.02.05 15:00:00', "ISM Svc");
+   AddNews(D'2025.02.05 15:30:00', "Oil Inv");
+   AddNews(D'2025.02.06 13:30:00', "Claims");
+   AddNews(D'2025.02.07 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.02.12 13:30:00', "CPI / Core CPI");
+   AddNews(D'2025.02.12 15:30:00', "Oil Inv");
+   AddNews(D'2025.02.13 13:30:00', "PPI / Claims");
+   AddNews(D'2025.02.14 13:30:00', "Retail Sales");
+   AddNews(D'2025.02.19 15:30:00', "Oil Inv");
+   AddNews(D'2025.02.19 19:00:00', "FOMC Minutes");
+   AddNews(D'2025.02.20 13:30:00', "Claims");
+   AddNews(D'2025.02.21 14:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.02.21 15:00:00', "Existing Homes");
+   AddNews(D'2025.02.25 15:00:00', "CB Confidence");
+   AddNews(D'2025.02.26 15:00:00', "New Homes");
+   AddNews(D'2025.02.26 15:30:00', "Oil Inv");
+   AddNews(D'2025.02.27 13:30:00', "GDP / Durable Goods / Claims");
+   AddNews(D'2025.02.28 13:00:00', "DE CPI Prel");
+   AddNews(D'2025.02.28 13:30:00', "PCE / Core PCE");
+   AddNews(D'2025.02.28 14:45:00', "Chicago PMI");
+   AddNews(D'2025.03.03 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.03.03 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.03.03 15:00:00', "ISM Mfg");
+   AddNews(D'2025.03.05 13:15:00', "ADP");
+   AddNews(D'2025.03.05 14:45:00', "S&P Svc PMI");
+   AddNews(D'2025.03.05 15:00:00', "ISM Svc");
+   AddNews(D'2025.03.05 15:30:00', "Oil Inv");
+   AddNews(D'2025.03.06 12:15:00', "ECB Rate");
+   AddNews(D'2025.03.06 12:45:00', "ECB Press");
+   AddNews(D'2025.03.06 13:30:00', "Claims");
+   AddNews(D'2025.03.07 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.03.11 14:00:00', "JOLTS");
+   AddNews(D'2025.03.12 12:30:00', "CPI / Core CPI");
+   AddNews(D'2025.03.12 14:30:00', "Oil Inv");
+   AddNews(D'2025.03.13 12:30:00', "PPI / Claims");
+   AddNews(D'2025.03.14 12:30:00', "Retail Sales");
+   AddNews(D'2025.03.19 14:30:00', "Oil Inv");
+   AddNews(D'2025.03.19 18:00:00', "FOMC");
+   AddNews(D'2025.03.19 18:30:00', "FOMC Press");
+   AddNews(D'2025.03.20 12:30:00', "Claims");
+   AddNews(D'2025.03.21 14:00:00', "Existing Homes");
+   AddNews(D'2025.03.24 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.03.25 14:00:00', "CB Confidence");
+   AddNews(D'2025.03.26 12:30:00', "Durable Goods");
+   AddNews(D'2025.03.26 14:00:00', "New Homes");
+   AddNews(D'2025.03.26 14:30:00', "Oil Inv");
+   AddNews(D'2025.03.27 12:30:00', "GDP / Claims");
+   AddNews(D'2025.03.28 12:30:00', "PCE / Core PCE");
+   AddNews(D'2025.03.31 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.03.31 13:45:00', "Chicago PMI");
+   AddNews(D'2025.04.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.04.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.04.01 14:00:00', "ISM Mfg / JOLTS");
+   AddNews(D'2025.04.02 12:15:00', "ADP");
+   AddNews(D'2025.04.02 14:30:00', "Oil Inv");
+   AddNews(D'2025.04.03 12:30:00', "Claims");
+   AddNews(D'2025.04.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.04.03 14:00:00', "ISM Svc");
+   AddNews(D'2025.04.04 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.04.09 14:30:00', "Oil Inv");
+   AddNews(D'2025.04.09 18:00:00', "FOMC Minutes");
+   AddNews(D'2025.04.10 12:30:00', "CPI / Core CPI / Claims");
+   AddNews(D'2025.04.11 12:30:00', "PPI");
+   AddNews(D'2025.04.16 12:30:00', "Retail Sales");
+   AddNews(D'2025.04.16 14:30:00', "Oil Inv");
+   AddNews(D'2025.04.17 12:15:00', "ECB Rate");
+   AddNews(D'2025.04.17 12:30:00', "Claims");
+   AddNews(D'2025.04.17 12:45:00', "ECB Press");
+   AddNews(D'2025.04.18 14:00:00', "Existing Homes");
+   AddNews(D'2025.04.23 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.04.23 14:00:00', "New Homes");
+   AddNews(D'2025.04.23 14:30:00', "Oil Inv");
+   AddNews(D'2025.04.24 12:30:00', "Durable Goods / Claims");
+   AddNews(D'2025.04.29 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.04.29 14:00:00', "CB Confidence");
+   AddNews(D'2025.04.30 12:30:00', "PCE / Core PCE / GDP");
+   AddNews(D'2025.04.30 13:45:00', "Chicago PMI");
+   AddNews(D'2025.04.30 14:30:00', "Oil Inv");
+   AddNews(D'2025.05.01 12:30:00', "Claims");
+   AddNews(D'2025.05.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.05.01 14:00:00', "ISM Mfg");
+   AddNews(D'2025.05.02 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.05.02 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.05.05 14:00:00', "ISM Svc");
+   AddNews(D'2025.05.06 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.05.06 14:00:00', "JOLTS");
+   AddNews(D'2025.05.07 12:15:00', "ADP");
+   AddNews(D'2025.05.07 14:30:00', "Oil Inv");
+   AddNews(D'2025.05.07 18:00:00', "FOMC");
+   AddNews(D'2025.05.07 18:30:00', "FOMC Press");
+   AddNews(D'2025.05.08 12:30:00', "Claims");
+   AddNews(D'2025.05.13 12:30:00', "CPI / Core CPI");
+   AddNews(D'2025.05.14 14:30:00', "Oil Inv");
+   AddNews(D'2025.05.15 12:30:00', "PPI / Retail Sales / Claims");
+   AddNews(D'2025.05.21 14:30:00', "Oil Inv");
+   AddNews(D'2025.05.22 12:30:00', "Claims");
+   AddNews(D'2025.05.22 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.05.22 14:00:00', "Existing Homes");
+   AddNews(D'2025.05.23 14:00:00', "New Homes");
+   AddNews(D'2025.05.27 12:30:00', "Durable Goods");
+   AddNews(D'2025.05.27 14:00:00', "CB Confidence");
+   AddNews(D'2025.05.28 14:30:00', "Oil Inv");
+   AddNews(D'2025.05.28 18:00:00', "FOMC Minutes");
+   AddNews(D'2025.05.29 12:30:00', "GDP / Claims");
+   AddNews(D'2025.05.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.05.30 12:30:00', "PCE / Core PCE");
+   AddNews(D'2025.05.30 13:45:00', "Chicago PMI");
+   AddNews(D'2025.06.02 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.06.02 14:00:00', "ISM Mfg");
+   AddNews(D'2025.06.03 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.06.03 14:00:00', "JOLTS");
+   AddNews(D'2025.06.04 12:15:00', "ADP");
+   AddNews(D'2025.06.04 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.06.04 14:00:00', "ISM Svc");
+   AddNews(D'2025.06.04 14:30:00', "Oil Inv");
+   AddNews(D'2025.06.05 12:15:00', "ECB Rate");
+   AddNews(D'2025.06.05 12:30:00', "Claims");
+   AddNews(D'2025.06.05 12:45:00', "ECB Press");
+   AddNews(D'2025.06.06 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.06.11 12:30:00', "CPI / Core CPI");
+   AddNews(D'2025.06.11 14:30:00', "Oil Inv");
+   AddNews(D'2025.06.12 12:30:00', "PPI / Claims");
+   AddNews(D'2025.06.17 12:30:00', "Retail Sales");
+   AddNews(D'2025.06.18 12:30:00', "Claims");
+   AddNews(D'2025.06.18 14:30:00', "Oil Inv");
+   AddNews(D'2025.06.18 18:00:00', "FOMC");
+   AddNews(D'2025.06.18 18:30:00', "FOMC Press");
+   AddNews(D'2025.06.20 14:00:00', "Existing Homes");
+   AddNews(D'2025.06.23 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.06.24 14:00:00', "CB Confidence");
+   AddNews(D'2025.06.25 12:30:00', "Durable Goods");
+   AddNews(D'2025.06.25 14:00:00', "New Homes");
+   AddNews(D'2025.06.25 14:30:00', "Oil Inv");
+   AddNews(D'2025.06.26 12:30:00', "GDP / Claims");
+   AddNews(D'2025.06.27 12:30:00', "PCE / Core PCE");
+   AddNews(D'2025.06.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.06.30 13:45:00', "Chicago PMI");
+   AddNews(D'2025.07.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.07.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.07.01 14:00:00', "ISM Mfg / JOLTS");
+   AddNews(D'2025.07.02 12:15:00', "ADP");
+   AddNews(D'2025.07.02 14:30:00', "Oil Inv");
+   AddNews(D'2025.07.03 12:30:00', "NFP / Unemp / AHE / Claims");
+   AddNews(D'2025.07.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.07.03 14:00:00', "ISM Svc");
+   AddNews(D'2025.07.09 14:30:00', "Oil Inv");
+   AddNews(D'2025.07.09 18:00:00', "FOMC Minutes");
+   AddNews(D'2025.07.10 12:30:00', "Claims");
+   AddNews(D'2025.07.15 12:30:00', "CPI / Core CPI");
+   AddNews(D'2025.07.16 12:30:00', "PPI");
+   AddNews(D'2025.07.16 14:30:00', "Oil Inv");
+   AddNews(D'2025.07.17 12:30:00', "Retail Sales / Claims");
+   AddNews(D'2025.07.23 14:00:00', "Existing Homes");
+   AddNews(D'2025.07.23 14:30:00', "Oil Inv");
+   AddNews(D'2025.07.24 12:15:00', "ECB Rate");
+   AddNews(D'2025.07.24 12:30:00', "Claims");
+   AddNews(D'2025.07.24 12:45:00', "ECB Press");
+   AddNews(D'2025.07.24 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.07.24 14:00:00', "New Homes");
+   AddNews(D'2025.07.25 12:30:00', "Durable Goods");
+   AddNews(D'2025.07.29 14:00:00', "CB Confidence");
+   AddNews(D'2025.07.30 12:30:00', "GDP");
+   AddNews(D'2025.07.30 14:30:00', "Oil Inv");
+   AddNews(D'2025.07.30 18:00:00', "FOMC");
+   AddNews(D'2025.07.30 18:30:00', "FOMC Press");
+   AddNews(D'2025.07.31 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.07.31 12:30:00', "PCE / Core PCE / Claims");
+   AddNews(D'2025.07.31 13:45:00', "Chicago PMI");
+   AddNews(D'2025.08.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.08.01 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.08.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.08.01 14:00:00', "ISM Mfg");
+   AddNews(D'2025.08.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.08.05 14:00:00', "ISM Svc / JOLTS");
+   AddNews(D'2025.08.06 12:15:00', "ADP");
+   AddNews(D'2025.08.06 14:30:00', "Oil Inv");
+   AddNews(D'2025.08.07 12:30:00', "Claims");
+   AddNews(D'2025.08.12 12:30:00', "CPI / Core CPI");
+   AddNews(D'2025.08.13 14:30:00', "Oil Inv");
+   AddNews(D'2025.08.14 12:30:00', "PPI / Claims");
+   AddNews(D'2025.08.15 12:30:00', "Retail Sales");
+   AddNews(D'2025.08.20 14:30:00', "Oil Inv");
+   AddNews(D'2025.08.20 18:00:00', "FOMC Minutes");
+   AddNews(D'2025.08.21 12:30:00', "Claims");
+   AddNews(D'2025.08.21 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.08.21 14:00:00', "Existing Homes");
+   AddNews(D'2025.08.25 14:00:00', "New Homes");
+   AddNews(D'2025.08.26 12:30:00', "Durable Goods");
+   AddNews(D'2025.08.26 14:00:00', "CB Confidence");
+   AddNews(D'2025.08.27 14:30:00', "Oil Inv");
+   AddNews(D'2025.08.28 12:30:00', "GDP / Claims");
+   AddNews(D'2025.08.29 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.08.29 12:30:00', "PCE / Core PCE");
+   AddNews(D'2025.08.29 13:45:00', "Chicago PMI");
+   AddNews(D'2025.09.02 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.09.02 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.09.02 14:00:00', "ISM Mfg");
+   AddNews(D'2025.09.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.09.03 14:00:00', "JOLTS");
+   AddNews(D'2025.09.03 14:30:00', "Oil Inv");
+   AddNews(D'2025.09.04 12:15:00', "ADP");
+   AddNews(D'2025.09.04 12:30:00', "Claims");
+   AddNews(D'2025.09.04 14:00:00', "ISM Svc");
+   AddNews(D'2025.09.05 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.09.10 14:30:00', "Oil Inv");
+   AddNews(D'2025.09.11 12:15:00', "ECB Rate");
+   AddNews(D'2025.09.11 12:30:00', "CPI / Core CPI / Claims");
+   AddNews(D'2025.09.11 12:45:00', "ECB Press");
+   AddNews(D'2025.09.12 12:30:00', "PPI");
+   AddNews(D'2025.09.16 12:30:00', "Retail Sales");
+   AddNews(D'2025.09.17 14:30:00', "Oil Inv");
+   AddNews(D'2025.09.17 18:00:00', "FOMC");
+   AddNews(D'2025.09.17 18:30:00', "FOMC Press");
+   AddNews(D'2025.09.18 12:30:00', "Claims");
+   AddNews(D'2025.09.19 14:00:00', "Existing Homes");
+   AddNews(D'2025.09.23 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.09.24 14:00:00', "New Homes");
+   AddNews(D'2025.09.24 14:30:00', "Oil Inv");
+   AddNews(D'2025.09.25 12:30:00', "GDP / Durable Goods / Claims");
+   AddNews(D'2025.09.26 12:30:00', "PCE / Core PCE");
+   AddNews(D'2025.09.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.09.30 13:45:00', "Chicago PMI");
+   AddNews(D'2025.09.30 14:00:00', "CB Confidence");
+   AddNews(D'2025.10.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.10.01 12:15:00', "ADP");
+   AddNews(D'2025.10.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.10.01 14:00:00', "ISM Mfg");
+   AddNews(D'2025.10.01 14:30:00', "Oil Inv");
+   AddNews(D'2025.10.02 12:30:00', "Claims");
+   AddNews(D'2025.10.03 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2025.10.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2025.10.03 14:00:00', "ISM Svc");
+   AddNews(D'2025.10.07 14:00:00', "JOLTS");
+   AddNews(D'2025.10.08 14:30:00', "Oil Inv");
+   AddNews(D'2025.10.08 18:00:00', "FOMC Minutes");
+   AddNews(D'2025.10.09 12:30:00', "Claims");
+   AddNews(D'2025.10.15 14:30:00', "Oil Inv");
+   AddNews(D'2025.10.16 12:30:00', "Retail Sales / Claims");
+   AddNews(D'2025.10.22 14:30:00', "Oil Inv");
+   AddNews(D'2025.10.23 12:30:00', "Claims");
+   AddNews(D'2025.10.23 14:00:00', "Existing Homes");
+   AddNews(D'2025.10.24 12:30:00', "CPI / Core CPI");
+   AddNews(D'2025.10.24 13:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.10.24 14:00:00', "New Homes");
+   AddNews(D'2025.10.28 12:30:00', "Durable Goods");
+   AddNews(D'2025.10.28 14:00:00', "CB Confidence");
+   AddNews(D'2025.10.29 14:30:00', "Oil Inv");
+   AddNews(D'2025.10.29 18:00:00', "FOMC");
+   AddNews(D'2025.10.29 18:30:00', "FOMC Press");
+   AddNews(D'2025.10.30 12:15:00', "ECB Rate");
+   AddNews(D'2025.10.30 12:30:00', "GDP / Claims");
+   AddNews(D'2025.10.30 12:45:00', "ECB Press");
+   AddNews(D'2025.10.31 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.10.31 12:00:00', "DE CPI Prel");
+   AddNews(D'2025.10.31 12:30:00', "PCE / Core PCE");
+   AddNews(D'2025.10.31 13:45:00', "Chicago PMI");
+   AddNews(D'2025.11.03 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.11.03 15:00:00', "ISM Mfg");
+   AddNews(D'2025.11.05 13:15:00', "ADP");
+   AddNews(D'2025.11.05 14:45:00', "S&P Svc PMI");
+   AddNews(D'2025.11.05 15:00:00', "ISM Svc");
+   AddNews(D'2025.11.05 15:30:00', "Oil Inv");
+   AddNews(D'2025.11.06 13:30:00', "Claims");
+   AddNews(D'2025.11.12 15:30:00', "Oil Inv");
+   AddNews(D'2025.11.13 13:30:00', "Claims");
+   AddNews(D'2025.11.19 15:30:00', "Oil Inv");
+   AddNews(D'2025.11.19 19:00:00', "FOMC Minutes");
+   AddNews(D'2025.11.20 13:30:00', "NFP / Unemp / AHE / Claims");
+   AddNews(D'2025.11.21 14:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.11.21 15:00:00', "Existing Homes");
+   AddNews(D'2025.11.25 13:30:00', "PPI");
+   AddNews(D'2025.11.25 15:00:00', "CB Confidence");
+   AddNews(D'2025.11.26 13:30:00', "Retail Sales / PCE / Core PCE / GDP / Durable Goods / Claims");
+   AddNews(D'2025.11.26 14:45:00', "Chicago PMI");
+   AddNews(D'2025.11.26 15:00:00', "New Homes");
+   AddNews(D'2025.11.26 15:30:00', "Oil Inv");
+   AddNews(D'2025.11.28 13:00:00', "DE CPI Prel");
+   AddNews(D'2025.12.01 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2025.12.01 15:00:00', "ISM Mfg");
+   AddNews(D'2025.12.02 10:00:00', "EU CPI Flash");
+   AddNews(D'2025.12.03 13:15:00', "ADP");
+   AddNews(D'2025.12.03 14:45:00', "S&P Svc PMI");
+   AddNews(D'2025.12.03 15:00:00', "ISM Svc");
+   AddNews(D'2025.12.03 15:30:00', "Oil Inv");
+   AddNews(D'2025.12.04 13:30:00', "Claims");
+   AddNews(D'2025.12.09 15:00:00', "JOLTS");
+   AddNews(D'2025.12.10 15:30:00', "Oil Inv");
+   AddNews(D'2025.12.10 19:00:00', "FOMC");
+   AddNews(D'2025.12.10 19:30:00', "FOMC Press");
+   AddNews(D'2025.12.11 13:30:00', "Claims");
+   AddNews(D'2025.12.16 13:30:00', "NFP / Unemp / AHE / Retail Sales");
+   AddNews(D'2025.12.16 14:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2025.12.17 15:30:00', "Oil Inv");
+   AddNews(D'2025.12.18 12:15:00', "ECB Rate");
+   AddNews(D'2025.12.18 12:45:00', "ECB Press");
+   AddNews(D'2025.12.18 13:30:00', "CPI / Core CPI / Claims");
+   AddNews(D'2025.12.19 13:30:00', "PCE / Core PCE");
+   AddNews(D'2025.12.19 15:00:00', "Existing Homes");
+   AddNews(D'2025.12.23 13:30:00', "GDP / Durable Goods");
+   AddNews(D'2025.12.23 15:00:00', "CB Confidence / New Homes");
+   AddNews(D'2025.12.24 13:30:00', "Claims");
+   AddNews(D'2025.12.24 15:30:00', "Oil Inv");
+   AddNews(D'2025.12.30 13:00:00', "DE CPI Prel");
+   AddNews(D'2025.12.30 19:00:00', "FOMC Minutes");
+   AddNews(D'2025.12.31 14:45:00', "Chicago PMI");
+   AddNews(D'2025.12.31 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.01.05 15:00:00', "ISM Mfg");
+   AddNews(D'2026.01.06 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.01.07 13:15:00', "ADP");
+   AddNews(D'2026.01.07 15:00:00', "ISM Svc");
+   AddNews(D'2026.01.07 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.08 13:30:00', "Claims");
+   AddNews(D'2026.01.09 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.01.13 13:30:00', "CPI / Core CPI");
+   AddNews(D'2026.01.13 15:00:00', "New Homes");
+   AddNews(D'2026.01.13 19:00:00', "Trump");
+   AddNews(D'2026.01.14 13:30:00', "PPI / Retail Sales");
+   AddNews(D'2026.01.14 15:00:00', "Existing Homes");
+   AddNews(D'2026.01.14 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.15 13:30:00', "Claims");
+   AddNews(D'2026.01.21 13:30:00', "Trump");
+   AddNews(D'2026.01.22 12:15:00', "ECB Rate");
+   AddNews(D'2026.01.22 12:45:00', "ECB Press");
+   AddNews(D'2026.01.22 13:30:00', "GDP");
+   AddNews(D'2026.01.22 15:00:00', "PCE / Core PCE / PCE / Core PCE");
+   AddNews(D'2026.01.22 17:00:00', "Oil Inv");
+   AddNews(D'2026.01.23 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.01.26 13:30:00', "Durable Goods");
+   AddNews(D'2026.01.27 15:00:00', "CB Confidence");
+   AddNews(D'2026.01.27 21:00:00', "Trump");
+   AddNews(D'2026.01.28 15:30:00', "Oil Inv");
+   AddNews(D'2026.01.28 19:00:00', "FOMC");
+   AddNews(D'2026.01.28 19:30:00', "FOMC Press");
+   AddNews(D'2026.01.29 13:30:00', "Claims");
+   AddNews(D'2026.01.29 21:30:00', "Trump");
+   AddNews(D'2026.01.30 13:00:00', "DE CPI Prel");
+   AddNews(D'2026.01.30 13:30:00', "PPI");
+   AddNews(D'2026.01.30 14:45:00', "Chicago PMI");
+   AddNews(D'2026.02.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.02.02 15:00:00', "ISM Mfg");
+   AddNews(D'2026.02.04 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.02.04 13:15:00', "ADP");
+   AddNews(D'2026.02.04 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.02.04 15:00:00', "ISM Svc");
+   AddNews(D'2026.02.04 15:30:00', "Oil Inv");
+   AddNews(D'2026.02.05 13:30:00', "Claims");
+   AddNews(D'2026.02.05 15:00:00', "JOLTS");
+   AddNews(D'2026.02.06 00:00:00', "Trump");
+   AddNews(D'2026.02.10 13:30:00', "Retail Sales");
+   AddNews(D'2026.02.11 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.02.11 15:30:00', "Oil Inv");
+   AddNews(D'2026.02.12 13:30:00', "Claims");
+   AddNews(D'2026.02.12 15:00:00', "Existing Homes");
+   AddNews(D'2026.02.13 13:30:00', "CPI / Core CPI");
+   AddNews(D'2026.02.18 13:30:00', "Durable Goods");
+   AddNews(D'2026.02.18 19:00:00', "FOMC Minutes");
+   AddNews(D'2026.02.19 13:30:00', "Claims");
+   AddNews(D'2026.02.19 17:00:00', "Oil Inv");
+   AddNews(D'2026.02.20 13:30:00', "PCE / Core PCE");
+   AddNews(D'2026.02.20 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.02.20 15:00:00', "New Homes");
+   AddNews(D'2026.02.20 17:45:00', "Trump");
+   AddNews(D'2026.02.24 15:00:00', "CB Confidence");
+   AddNews(D'2026.02.25 02:00:00', "Trump");
+   AddNews(D'2026.02.25 15:30:00', "Oil Inv");
+   AddNews(D'2026.02.26 13:30:00', "Claims");
+   AddNews(D'2026.02.27 13:00:00', "DE CPI Prel");
+   AddNews(D'2026.02.27 13:30:00', "PPI");
+   AddNews(D'2026.02.27 14:45:00', "Chicago PMI");
+   AddNews(D'2026.03.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.03.02 15:00:00', "ISM Mfg");
+   AddNews(D'2026.03.02 16:00:00', "Trump");
+   AddNews(D'2026.03.03 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.03.04 13:15:00', "ADP");
+   AddNews(D'2026.03.04 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.03.04 15:00:00', "ISM Svc");
+   AddNews(D'2026.03.04 15:30:00', "Oil Inv");
+   AddNews(D'2026.03.05 12:15:00', "ECB Rate");
+   AddNews(D'2026.03.05 12:45:00', "ECB Press");
+   AddNews(D'2026.03.05 13:30:00', "Claims");
+   AddNews(D'2026.03.06 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.03.10 14:00:00', "Existing Homes");
+   AddNews(D'2026.03.11 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.03.11 14:30:00', "Oil Inv");
+   AddNews(D'2026.03.11 20:25:00', "Trump");
+   AddNews(D'2026.03.12 12:30:00', "Claims");
+   AddNews(D'2026.03.13 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.03.13 14:00:00', "JOLTS");
+   AddNews(D'2026.03.16 15:30:00', "Trump");
+   AddNews(D'2026.03.17 15:30:00', "Trump");
+   AddNews(D'2026.03.18 12:30:00', "PPI");
+   AddNews(D'2026.03.18 14:30:00', "Oil Inv");
+   AddNews(D'2026.03.18 18:00:00', "FOMC");
+   AddNews(D'2026.03.18 18:30:00', "FOMC Press");
+   AddNews(D'2026.03.19 12:30:00', "Claims");
+   AddNews(D'2026.03.19 14:00:00', "New Homes");
+   AddNews(D'2026.03.21 14:30:00', "Fed Chair");
+   AddNews(D'2026.03.23 13:30:00', "Trump");
+   AddNews(D'2026.03.24 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.03.25 14:30:00', "Oil Inv");
+   AddNews(D'2026.03.25 23:20:00', "Trump");
+   AddNews(D'2026.03.26 12:30:00', "Claims");
+   AddNews(D'2026.03.26 19:00:00', "Trump");
+   AddNews(D'2026.03.26 20:00:00', "Trump");
+   AddNews(D'2026.03.27 21:30:00', "Trump");
+   AddNews(D'2026.03.29 22:30:00', "Trump");
+   AddNews(D'2026.03.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.03.30 14:30:00', "Fed Chair");
+   AddNews(D'2026.03.31 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.03.31 13:45:00', "Chicago PMI");
+   AddNews(D'2026.03.31 14:00:00', "JOLTS");
+   AddNews(D'2026.04.01 12:15:00', "ADP");
+   AddNews(D'2026.04.01 12:30:00', "Retail Sales");
+   AddNews(D'2026.04.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.04.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.04.01 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.02 01:00:00', "Trump");
+   AddNews(D'2026.04.02 12:30:00', "Claims");
+   AddNews(D'2026.04.03 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.04.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.04.06 14:00:00', "ISM Svc");
+   AddNews(D'2026.04.06 17:00:00', "Trump");
+   AddNews(D'2026.04.07 12:30:00', "Durable Goods");
+   AddNews(D'2026.04.08 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.08 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.04.09 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.04.10 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.04.13 14:00:00', "Existing Homes");
+   AddNews(D'2026.04.14 12:30:00', "PPI");
+   AddNews(D'2026.04.15 10:00:00', "Trump");
+   AddNews(D'2026.04.15 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.16 12:30:00', "Claims");
+   AddNews(D'2026.04.16 23:00:00', "Trump");
+   AddNews(D'2026.04.17 18:00:00', "Trump");
+   AddNews(D'2026.04.21 12:30:00', "Retail Sales");
+   AddNews(D'2026.04.22 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.23 12:30:00', "Claims");
+   AddNews(D'2026.04.23 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.04.25 16:00:00', "Trump");
+   AddNews(D'2026.04.26 02:45:00', "Trump");
+   AddNews(D'2026.04.26 23:00:00', "Trump");
+   AddNews(D'2026.04.28 14:00:00', "CB Confidence");
+   AddNews(D'2026.04.29 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.04.29 12:30:00', "Durable Goods");
+   AddNews(D'2026.04.29 14:30:00', "Oil Inv");
+   AddNews(D'2026.04.29 18:00:00', "FOMC");
+   AddNews(D'2026.04.29 18:30:00', "FOMC Press");
+   AddNews(D'2026.04.30 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.04.30 12:15:00', "ECB Rate");
+   AddNews(D'2026.04.30 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.04.30 12:45:00', "ECB Press");
+   AddNews(D'2026.04.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.05.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.05.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.05.01 19:00:00', "Trump");
+   AddNews(D'2026.05.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.05.05 14:00:00', "New Homes / ISM Svc");
+   AddNews(D'2026.05.06 12:15:00', "ADP");
+   AddNews(D'2026.05.06 14:30:00', "Oil Inv");
+   AddNews(D'2026.05.07 12:30:00', "Claims");
+   AddNews(D'2026.05.08 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.05.08 16:00:00', "Trump");
+   AddNews(D'2026.05.11 14:00:00', "Existing Homes");
+   AddNews(D'2026.05.12 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.05.13 12:30:00', "PPI");
+   AddNews(D'2026.05.13 14:30:00', "Oil Inv");
+   AddNews(D'2026.05.14 12:30:00', "Retail Sales");
+   AddNews(D'2026.05.20 14:30:00', "Oil Inv");
+   AddNews(D'2026.05.20 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.05.21 12:30:00', "Claims");
+   AddNews(D'2026.05.21 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.05.26 14:00:00', "CB Confidence");
+   AddNews(D'2026.05.28 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.05.28 14:00:00', "New Homes");
+   AddNews(D'2026.05.28 16:00:00', "Oil Inv");
+   AddNews(D'2026.05.29 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.05.29 13:45:00', "Chicago PMI");
+   AddNews(D'2026.06.01 00:30:00', "Fed Chair");
+   AddNews(D'2026.06.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.06.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.06.02 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.06.02 14:00:00', "JOLTS");
+   AddNews(D'2026.06.03 12:15:00', "ADP");
+   AddNews(D'2026.06.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.06.03 14:00:00', "ISM Svc");
+   AddNews(D'2026.06.03 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.04 12:30:00', "Claims");
+   AddNews(D'2026.06.04 19:00:00', "Trump");
+   AddNews(D'2026.06.05 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.06.09 14:00:00', "Existing Homes");
+   AddNews(D'2026.06.10 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.06.10 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.11 12:15:00', "ECB Rate");
+   AddNews(D'2026.06.11 12:30:00', "PPI");
+   AddNews(D'2026.06.11 12:45:00', "ECB Press");
+   AddNews(D'2026.06.17 12:30:00', "Retail Sales");
+   AddNews(D'2026.06.17 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.17 14:45:00', "Trump");
+   AddNews(D'2026.06.17 18:00:00', "FOMC");
+   AddNews(D'2026.06.17 18:30:00', "FOMC Press");
+   AddNews(D'2026.06.18 12:30:00', "Claims");
+   AddNews(D'2026.06.23 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.06.23 18:05:00', "Trump");
+   AddNews(D'2026.06.24 14:00:00', "New Homes");
+   AddNews(D'2026.06.24 14:30:00', "Oil Inv");
+   AddNews(D'2026.06.25 00:30:00', "Trump");
+   AddNews(D'2026.06.25 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.06.26 17:30:00', "Trump");
+   AddNews(D'2026.06.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.06.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.06.30 14:00:00', "JOLTS");
+   AddNews(D'2026.07.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.07.01 12:15:00', "ADP");
+   AddNews(D'2026.07.01 13:00:00', "Fed Chair");
+   AddNews(D'2026.07.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.07.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.07.01 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.01 19:15:00', "Trump");
+   AddNews(D'2026.07.02 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.07.06 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.07.06 14:00:00', "ISM Svc");
+   AddNews(D'2026.07.08 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.08 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.07.09 12:30:00', "Claims");
+   AddNews(D'2026.07.09 14:00:00', "Existing Homes");
+   AddNews(D'2026.07.10 15:00:00', "Fed Monetary Policy Report");
+   AddNews(D'2026.07.14 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.07.15 12:30:00', "PPI");
+   AddNews(D'2026.07.15 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.16 12:30:00', "Retail Sales");
+   AddNews(D'2026.07.17 01:00:00', "Trump");
+   AddNews(D'2026.07.22 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.22 19:00:00', "Trump");
+   AddNews(D'2026.07.23 12:15:00', "ECB Rate");
+   AddNews(D'2026.07.23 12:30:00', "Claims");
+   AddNews(D'2026.07.23 12:45:00', "ECB Press");
+   AddNews(D'2026.07.24 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.07.24 14:00:00', "New Homes");
+   AddNews(D'2026.07.25 00:55:00', "Trump");
+   AddNews(D'2026.07.27 12:30:00', "Durable Goods");
+   AddNews(D'2026.07.27 18:50:00', "Trump");
+   AddNews(D'2026.07.28 14:00:00', "CB Confidence");
+   AddNews(D'2026.07.29 14:30:00', "Oil Inv");
+   AddNews(D'2026.07.29 18:00:00', "FOMC");
+   AddNews(D'2026.07.29 18:30:00', "FOMC Press");
+   AddNews(D'2026.07.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.07.30 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.07.31 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.07.31 13:45:00', "Chicago PMI");
+   AddNews(D'2026.08.03 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.08.03 14:00:00', "ISM Mfg");
+   AddNews(D'2026.08.04 14:00:00', "JOLTS");
+   AddNews(D'2026.08.05 12:15:00', "ADP");
+   AddNews(D'2026.08.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.08.05 14:00:00', "ISM Svc");
+   AddNews(D'2026.08.05 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.05 20:30:00', "Trump");
+   AddNews(D'2026.08.06 12:30:00', "Claims");
+   AddNews(D'2026.08.07 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.08.11 14:00:00', "Existing Homes");
+   AddNews(D'2026.08.12 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.08.12 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.13 12:30:00', "PPI");
+   AddNews(D'2026.08.14 12:30:00', "Retail Sales");
+   AddNews(D'2026.08.14 19:00:00', "Trump");
+   AddNews(D'2026.08.19 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.19 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.08.19 18:30:00', "Trump");
+   AddNews(D'2026.08.20 12:30:00', "Claims");
+   AddNews(D'2026.08.21 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.08.21 23:00:00', "Trump");
+   AddNews(D'2026.08.25 14:00:00', "CB Confidence");
+   AddNews(D'2026.08.26 12:30:00', "PCE / Core PCE");
+   AddNews(D'2026.08.26 14:30:00', "Oil Inv");
+   AddNews(D'2026.08.27 12:30:00', "Claims");
+   AddNews(D'2026.08.28 13:45:00', "Chicago PMI");
+   AddNews(D'2026.08.28 14:00:00', "Fed Chair");
+   AddNews(D'2026.08.31 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.08.31 13:45:00', "Chicago PMI");
+   AddNews(D'2026.09.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.09.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.09.01 14:00:00', "ISM Mfg / JOLTS");
+   AddNews(D'2026.09.02 12:15:00', "ADP");
+   AddNews(D'2026.09.02 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.03 12:30:00', "Claims");
+   AddNews(D'2026.09.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.09.03 14:00:00', "ISM Svc");
+   AddNews(D'2026.09.04 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.09.09 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.10 12:15:00', "ECB Rate");
+   AddNews(D'2026.09.10 12:30:00', "PPI / Claims");
+   AddNews(D'2026.09.10 12:45:00', "ECB Press");
+   AddNews(D'2026.09.10 14:00:00', "Existing Homes");
+   AddNews(D'2026.09.11 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.09.16 12:30:00', "Retail Sales");
+   AddNews(D'2026.09.16 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.16 18:00:00', "FOMC");
+   AddNews(D'2026.09.16 18:30:00', "FOMC Press");
+   AddNews(D'2026.09.17 12:30:00', "Claims");
+   AddNews(D'2026.09.23 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.09.23 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.24 12:30:00', "Claims");
+   AddNews(D'2026.09.24 14:00:00', "New Homes");
+   AddNews(D'2026.09.25 12:30:00', "Durable Goods");
+   AddNews(D'2026.09.29 14:00:00', "JOLTS / CB Confidence");
+   AddNews(D'2026.09.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.09.30 12:15:00', "ADP");
+   AddNews(D'2026.09.30 12:30:00', "GDP / PCE / Core PCE");
+   AddNews(D'2026.09.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.09.30 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.01 12:30:00', "Claims");
+   AddNews(D'2026.10.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.10.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.10.02 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.10.02 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.10.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.10.05 14:00:00', "ISM Svc");
+   AddNews(D'2026.10.07 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.07 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.10.08 12:30:00', "Claims");
+   AddNews(D'2026.10.13 14:00:00', "Existing Homes");
+   AddNews(D'2026.10.14 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.10.14 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.15 12:30:00', "PPI / Retail Sales / Claims");
+   AddNews(D'2026.10.21 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.22 12:30:00', "Claims");
+   AddNews(D'2026.10.22 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.10.27 12:30:00', "Durable Goods");
+   AddNews(D'2026.10.27 14:00:00', "New Homes / CB Confidence");
+   AddNews(D'2026.10.28 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.28 18:00:00', "FOMC");
+   AddNews(D'2026.10.28 18:30:00', "FOMC Press");
+   AddNews(D'2026.10.29 12:15:00', "ECB Rate");
+   AddNews(D'2026.10.29 12:30:00', "GDP / PCE / Core PCE / Claims");
+   AddNews(D'2026.10.29 12:45:00', "ECB Press");
+   AddNews(D'2026.10.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.10.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.11.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.11.02 15:00:00', "ISM Mfg");
+   AddNews(D'2026.11.03 15:00:00', "JOLTS");
+   AddNews(D'2026.11.04 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.11.04 13:15:00', "ADP");
+   AddNews(D'2026.11.04 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.11.04 15:00:00', "ISM Svc");
+   AddNews(D'2026.11.04 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.05 13:30:00', "Claims");
+   AddNews(D'2026.11.06 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.11.10 13:30:00', "CPI / Core CPI");
+   AddNews(D'2026.11.11 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.12 13:30:00', "Claims");
+   AddNews(D'2026.11.12 15:00:00', "Existing Homes");
+   AddNews(D'2026.11.13 13:30:00', "PPI");
+   AddNews(D'2026.11.17 13:30:00', "Retail Sales");
+   AddNews(D'2026.11.18 13:30:00', "Claims");
+   AddNews(D'2026.11.18 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.18 19:00:00', "FOMC Minutes");
+   AddNews(D'2026.11.23 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.11.24 15:00:00', "CB Confidence");
+   AddNews(D'2026.11.25 13:30:00', "GDP / PCE / Core PCE / Durable Goods / Claims");
+   AddNews(D'2026.11.25 15:00:00', "New Homes");
+   AddNews(D'2026.11.25 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.30 13:00:00', "DE CPI Prel");
+   AddNews(D'2026.11.30 14:45:00', "Chicago PMI");
+   AddNews(D'2026.12.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.12.01 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.12.01 15:00:00', "ISM Mfg / JOLTS");
+   AddNews(D'2026.12.02 13:15:00', "ADP");
+   AddNews(D'2026.12.02 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.03 13:30:00', "Claims");
+   AddNews(D'2026.12.03 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.12.03 15:00:00', "ISM Svc");
+   AddNews(D'2026.12.04 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.12.09 15:00:00', "Existing Homes");
+   AddNews(D'2026.12.09 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.09 19:00:00', "FOMC");
+   AddNews(D'2026.12.09 19:30:00', "FOMC Press");
+   AddNews(D'2026.12.10 13:30:00', "CPI / Core CPI / Claims");
+   AddNews(D'2026.12.15 13:30:00', "PPI");
+   AddNews(D'2026.12.16 13:30:00', "Retail Sales");
+   AddNews(D'2026.12.16 14:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2026.12.16 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.17 12:15:00', "ECB Rate");
+   AddNews(D'2026.12.17 12:45:00', "ECB Press");
+   AddNews(D'2026.12.17 13:30:00', "Claims");
+   AddNews(D'2026.12.23 13:30:00', "GDP / PCE / Core PCE / Durable Goods");
+   AddNews(D'2026.12.23 15:00:00', "New Homes");
+   AddNews(D'2026.12.23 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.24 13:30:00', "Claims");
+   AddNews(D'2026.12.29 15:00:00', "CB Confidence");
+   AddNews(D'2026.12.30 14:45:00', "Chicago PMI");
+   AddNews(D'2026.12.30 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.30 19:00:00', "FOMC Minutes");
+   AddNews(D'2026.12.31 13:30:00', "Claims");
+  }
+
+//+------------------------------------------------------------------+
+datetime LastSundayOfMonth(const int year, const int month)
+  {
+   MqlDateTime dt;
+   ZeroMemory(dt);
+   if(month == 12)
+     {
+      dt.year = year + 1;
+      dt.mon  = 1;
+     }
+   else
+     {
+      dt.year = year;
+      dt.mon  = month + 1;
+     }
+   dt.day = 1;
+   datetime t = StructToTime(dt) - 86400;
+   TimeToStruct(t, dt);
+   while(dt.day_of_week != 0)
+     {
+      t -= 86400;
+      TimeToStruct(t, dt);
+     }
+   return(t);
+  }
+
+//+------------------------------------------------------------------+
+//| Offset jam server HFM vs UTC pada timestamp UTC.                 |
+//+------------------------------------------------------------------+
+int HfmOffsetHours(const datetime utc)
+  {
+   if(utc <= 0)
+      return(2);
+   MqlDateTime dt;
+   TimeToStruct(utc, dt);
+   const datetime dstOn  = LastSundayOfMonth(dt.year, 3)  + 3600;
+   const datetime dstOff = LastSundayOfMonth(dt.year, 10) + 3600;
+   if(utc >= dstOn && utc < dstOff)
+      return(3);
+   return(2);
+  }
+
+//+------------------------------------------------------------------+
+datetime UtcToHfmChart(const datetime utc)
+  {
+   if(utc <= 0)
+      return(0);
+   return(utc + (datetime)HfmOffsetHours(utc) * 3600);
+  }
+
+//+------------------------------------------------------------------+
+//| Tebak offset HFM (2/3) dari waktu SERVER (kebalikan dari fungsi   |
+//| di atas yang mulai dari UTC). Cuma ada 2 kandidat offset.         |
+//+------------------------------------------------------------------+
+int HfmOffsetHoursFromServer(const datetime serverTime)
+  {
+   if(HfmOffsetHours(serverTime - 2 * 3600) == 2)
+      return(2);
+   if(HfmOffsetHours(serverTime - 3 * 3600) == 3)
+      return(3);
+   return(2);
+  }
+
+//+------------------------------------------------------------------+
+datetime ServerToUtc(const datetime serverTime)
+  {
+   if(serverTime <= 0)
+      return(0);
+   return(serverTime - (datetime)HfmOffsetHoursFromServer(serverTime) * 3600);
+  }
+
+//+------------------------------------------------------------------+
+//| Jendela jam rawan rugi (WIB, UTC+7 tetap tanpa DST). Hasil        |
+//| pemetaan jam-open per 15 menit dari 4 run backtest terverifikasi  |
+//| (Jan-Jul 2026, XAUUSD M5) — lihat catatan analisis untuk detail.  |
+//+------------------------------------------------------------------+
+struct HourFilterWindow
+  {
+   int    startMin; // menit sejak 00:00 WIB
+   int    endMin;   // inklusif
+   string label;
+  };
+
+HourFilterWindow g_hourWindows[] =
+  {
+   { 5 * 60 +  0,  5 * 60 + 59, "05:00-05:59 WIB" },
+   { 8 * 60 +  0,  8 * 60 + 44, "08:00-08:44 WIB" },
+   {12 * 60 +  0, 12 * 60 + 29, "12:00-12:29 WIB" },
+   {21 * 60 + 30, 21 * 60 + 59, "21:30-21:59 WIB" },
+   {22 * 60 +  0, 22 * 60 + 59, "22:00-22:59 WIB" },
+   {23 * 60 +  0, 23 * 60 + 29, "23:00-23:29 WIB" },
+  };
+
+//+------------------------------------------------------------------+
+bool InHourFilterWindow(string &labelOut)
+  {
+   labelOut = "";
+   if(!HourFilterOn())
+      return(false);
+   const datetime now = TimeCurrent();
+   if(now <= 0)
+      return(false);
+   const datetime utc = ServerToUtc(now);
+   const datetime wib = utc + 7 * 3600;
+   MqlDateTime dt;
+   TimeToStruct(wib, dt);
+   const int mins = dt.hour * 60 + dt.min;
+   const int n = ArraySize(g_hourWindows);
+   for(int i = 0; i < n; i++)
+     {
+      if(mins >= g_hourWindows[i].startMin && mins <= g_hourWindows[i].endMin)
+        {
+         labelOut = g_hourWindows[i].label;
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+//| Hari Kamis (WIB) rawan rugi konsisten di backtest multi-run --   |
+//| cuma blokir entry baru, posisi yang sudah ada dibiarkan jalan.   |
+//+------------------------------------------------------------------+
+bool IsDisabledDayWib()
+  {
+   if(!DayFilterOn())
+      return(false);
+   const datetime now = TimeCurrent();
+   if(now <= 0)
+      return(false);
+   const datetime utc = ServerToUtc(now);
+   const datetime wib = utc + 7 * 3600;
+   MqlDateTime dt;
+   TimeToStruct(wib, dt);
+   return(dt.day_of_week == THURSDAY);
+  }
+
+//+------------------------------------------------------------------+
+//| WIB (UTC+7 tetap) -> waktu server HFM, buat gambar garis chart.  |
+//+------------------------------------------------------------------+
+datetime WibToServer(const datetime wib)
+  {
+   if(wib <= 0)
+      return(0);
+   return(UtcToHfmChart(wib - 7 * 3600));
+  }
+
+//+------------------------------------------------------------------+
+bool InNewsWindow(string &nameOut)
+  {
+   nameOut = "";
+   if(!NewsFilterOn())
+      return(false);
+   const datetime now = TimeCurrent();
+   if(now <= 0)
+      return(false);
+   if(g_newsCacheUntil <= 0 || now < g_newsCacheFrom || now >= g_newsCacheUntil)
+      RefreshNewsCache(now);
+   nameOut = g_newsCacheName;
+   return(g_newsCacheIn);
+  }
+
+//+------------------------------------------------------------------+
+void CreateNewsVLine(const string name, const datetime t, const color clr,
+                     const ENUM_LINE_STYLE style, const string tip)
+  {
+   if(t <= 0)
+      return;
+   if(ObjectFind(0, name) >= 0)
+      ObjectDelete(0, name);
+   if(!ObjectCreate(0, name, OBJ_VLINE, 0, t, 0))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   PacObjLog("vline", name, t, 0.0, tip + " clr=" + ColorToString(clr, true));
+  }
+
+//+------------------------------------------------------------------+
+color FilterMarkColor(const color liveClr, const color pastClr, const datetime tOff)
+  {
+   if(tOff > 0 && tOff < TimeCurrent())
+      return(pastClr);
+   return(liveClr);
+  }
+
+//+------------------------------------------------------------------+
+double NewsLabelPrice(const datetime t)
+  {
+   if(t > 0)
+     {
+      const int sh = iBarShift(_Symbol, PERIOD_CURRENT, t, false);
+      if(sh >= 0)
+        {
+         const double h = iHigh(_Symbol, PERIOD_CURRENT, sh);
+         if(h > 0.0)
+            return(h);
+        }
+     }
+   const double pmax = ChartGetDouble(0, CHART_PRICE_MAX);
+   if(pmax > 0.0)
+      return(pmax);
+   return(SymbolInfoDouble(_Symbol, SYMBOL_BID));
+  }
+
+//+------------------------------------------------------------------+
+void CreateNewsLabel(const string name, const datetime t, const string text, const color clr)
+  {
+   if(t <= 0 || text == "")
+      return;
+   if(ObjectFind(0, name) >= 0)
+      ObjectDelete(0, name);
+   if(!ObjectCreate(0, name, OBJ_TEXT, 0, t, NewsLabelPrice(t)))
+      return;
+   ObjectSetString(0, name, OBJPROP_TEXT, text);
+   ObjectSetString(0, name, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, text);
+   PacObjLog("label", name, t, NewsLabelPrice(t), text + " clr=" + ColorToString(clr, true));
+  }
+
+//+------------------------------------------------------------------+
+void DeleteNewsMarks()
+  {
+   ObjectsDeleteAll(0, PREFIX_NEWS);
+  }
+
+//+------------------------------------------------------------------+
+void FilterMarkTimeRange(datetime &from, datetime &to)
+  {
+   const int bars = iBars(_Symbol, PERIOD_CURRENT);
+   const int lb = MathMax(InpLookback, 50);
+   int sh = lb;
+   if(bars > 1)
+      sh = (int)MathMin(lb, bars - 1);
+   from = (sh >= 0) ? iTime(_Symbol, PERIOD_CURRENT, sh) : 0;
+   if(from <= 0)
+      from = TimeCurrent() - (datetime)lb * PeriodSeconds(PERIOD_CURRENT);
+   to = TimeCurrent() + 86400;
+  }
+
+//+------------------------------------------------------------------+
+void DrawNewsMarks()
+  {
+   DeleteNewsMarks();
+   if(!NewsFilterOn() || !ChartVisualsOn())
+      return;
+   datetime from = 0, to = 0;
+   FilterMarkTimeRange(from, to);
+   int beforeMin = 0, afterMin = 0;
+   NewsWindowMins(beforeMin, afterMin);
+   const int before = beforeMin * 60;
+   const int after  = afterMin * 60;
+   const int n = NewsCount();
+   for(int i = 0; i < n; i++)
+     {
+      const datetime utc = NewsTimeUtc(i);
+      if(utc <= 0)
+         continue;
+      const string major = NewsMajorText(i);
+      const datetime tOn  = UtcToHfmChart(utc - before);
+      const datetime tOff = UtcToHfmChart(utc + after);
+      if(tOff < from || tOn > to)
+         continue;
+      const string id = IntegerToString(i);
+      const color clr = FilterMarkColor(NEWS_CLR, NEWS_CLR_PAST, tOff);
+      CreateNewsVLine(PREFIX_NEWS + "ON_" + id, tOn, clr, STYLE_DASH,
+                      major + " | jendela aktif");
+      CreateNewsVLine(PREFIX_NEWS + "OFF_" + id, tOff, clr, STYLE_DOT,
+                      major + " | jendela inaktif");
+      CreateNewsLabel(PREFIX_NEWS + "LB_" + id, tOn, major, clr);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DeleteHourMarks()
+  {
+   ObjectsDeleteAll(0, PREFIX_HOUR);
+  }
+
+//+------------------------------------------------------------------+
+//| Gambar garis jam hanya di jendela lookback (+1 hari ke depan).  |
+//+------------------------------------------------------------------+
+void DrawHourMarks()
+  {
+   DeleteHourMarks();
+   if(!HourFilterOn() || !ChartVisualsOn())
+      return;
+   datetime rangeStartServer = 0, rangeEndServer = 0;
+   FilterMarkTimeRange(rangeStartServer, rangeEndServer);
+   if(rangeStartServer <= 0 || rangeEndServer <= rangeStartServer)
+      return;
+
+   datetime wibStart = ServerToUtc(rangeStartServer) + 7 * 3600;
+   const datetime wibEnd = ServerToUtc(rangeEndServer) + 7 * 3600;
+   wibStart -= (wibStart % 86400); // turunkan ke tengah malam WIB
+
+   int idx = 0;
+   const int nWin = ArraySize(g_hourWindows);
+   for(datetime dayWib = wibStart; dayWib <= wibEnd; dayWib += 86400)
+     {
+      for(int w = 0; w < nWin; w++)
+        {
+         const datetime tOnWib  = dayWib + g_hourWindows[w].startMin * 60;
+         const datetime tOffWib = dayWib + g_hourWindows[w].endMin   * 60 + 60;
+         const datetime tOnServer  = WibToServer(tOnWib);
+         const datetime tOffServer = WibToServer(tOffWib);
+         if(tOffServer < rangeStartServer || tOnServer > rangeEndServer)
+            continue;
+         const string id = IntegerToString(idx++);
+         const color clr = FilterMarkColor(HOUR_CLR, HOUR_CLR_PAST, tOffServer);
+         CreateNewsVLine(PREFIX_HOUR + "ON_" + id, tOnServer, clr, STYLE_DASH,
+                         g_hourWindows[w].label + " | jendela jam mulai");
+         CreateNewsVLine(PREFIX_HOUR + "OFF_" + id, tOffServer, clr, STYLE_DOT,
+                         g_hourWindows[w].label + " | jendela jam berakhir");
+         CreateNewsLabel(PREFIX_HOUR + "LB_" + id, tOnServer, g_hourWindows[w].label, clr);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CancelNewsPendings()
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol)
+         continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+      const string cmt = OrderGetString(ORDER_COMMENT);
+      if(g_trade.OrderDelete(ticket) && TradeOk())
+         if(ChartVisualsOn()) Print("PAC news: hapus pending ", cmt);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CloseNewsPositions()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      const string cmt = PositionGetString(POSITION_COMMENT);
+      if(g_trade.PositionClose(ticket) && TradeOk())
+        {
+         if(ChartVisualsOn()) Print("PAC news: tutup posisi #", ticket, " ", cmt);
+        }
+      else
+        {
+         if(ChartVisualsOn()) Print("PAC news: gagal tutup #", ticket, " ret=",
+               g_trade.ResultRetcode(), " ", g_trade.ResultRetcodeDescription());
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void FlattenNewsExposure()
+  {
+   ArrayResize(g_tpBatches, 0);
+   CloseNewsPositions();
+   CancelNewsPendings();
+  }
+
+//+------------------------------------------------------------------+
+void DeleteMarks()
+  {
+   ObjectsDeleteAll(0, PREFIX_PB);
+   ObjectsDeleteAll(0, PREFIX_PS);
+   ObjectsDeleteAll(0, PREFIX_BASE);
+   ObjectsDeleteAll(0, PREFIX_RBR);
+   ObjectsDeleteAll(0, PREFIX_DBD);
+   ObjectsDeleteAll(0, PREFIX_SUP);
+   ObjectsDeleteAll(0, PREFIX_RES);
+   ObjectsDeleteAll(0, PREFIX_ATAP);
+   ObjectsDeleteAll(0, PREFIX_LANTAI);
+   ObjectsDeleteAll(0, PREFIX_LV);
+  }
+
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints((ulong)MathMax(InpDeviation, 0));
+   g_trade.SetAsyncMode(false);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
+   g_inRefresh = false;
+   g_clccGroup = "";
+   ArrayResize(g_groups, 0);
+   ArrayResize(g_snaps, 0);
+   ArrayResize(g_tpBatches, 0);
+   ArrayResize(g_processedDeals, 0);
+   ArrayResize(g_clccCl, 0);
+   ArrayResize(g_clccBuy, 0);
+   g_lastNewsName = "";
+   InitNewsCalendar();
+
+   if(UUsesAtr())
+     {
+      g_atrHandle = iATR(_Symbol, UAtrTimeframe(), AtrPeriod());
+      if(g_atrHandle == INVALID_HANDLE)
+         if(ChartVisualsOn()) Print("PAC: gagal membuat handle ATR, fallback ke pip tetap.");
+     }
+
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+      if(ChartVisualsOn()) Print("PAC: akun bukan hedging — layer bisa tergabung.");
+   if(NewsFilterOn())
+     {
+      int beforeMin = 0, afterMin = 0;
+      NewsWindowMins(beforeMin, afterMin);
+      if(ChartVisualsOn()) Print("PAC news filter ON. Tutup posisi + hapus pending. Jendela ",
+            beforeMin, " mnt sebelum / ", afterMin,
+            " mnt sesudah rilis. Hardcode Investing high-impact USD ",
+            IntegerToString(NewsCount()), " event, 1 Jan 2025-31 Des 2026 USD+EUR. Filter & garis chart jam HFM.");
+     }
+   if(HourFilterOn())
+     {
+      string hourList = "";
+      for(int hw = 0; hw < ArraySize(g_hourWindows); hw++)
+         hourList += (hw > 0 ? ", " : "") + g_hourWindows[hw].label;
+      string modeText = "?";
+      if(InpHourFilter == HOUR_FLATTEN_ALL)      modeText = "Tutup Semua";
+      if(InpHourFilter == HOUR_CANCEL_PENDING)   modeText = "Hanya Pending";
+      if(InpHourFilter == HOUR_BLOCK_ENTRY_ONLY) modeText = "Blokir Entri Baru";
+      if(ChartVisualsOn()) Print("PAC hour filter ON (mode: ", modeText, "). Jendela jam rawan rugi (WIB): ", hourList);
+     }
+   if(DayFilterOn())
+      if(ChartVisualsOn()) Print("PAC day filter ON: entry baru dimatikan tiap hari Kamis (WIB).");
+   if(InpTpAdaptive)
+      if(ChartVisualsOn()) Print("PAC TP adaptif ON: TP bisa menyempit ke zona standby terdekat, tidak pernah melebar.");
+   if(PivotKetatOn())
+      if(ChartVisualsOn()) Print("PAC Mode Pivot Ketat ON: 2 sewarna + Open vs Close di kiri dan kanan acuan.");
+   if(InpDebugChartObj)
+      if(ChartVisualsOn()) Print("PAC debug objek chart ON: tiap objek yang digambar dicatat di Jurnal (garis jam/news jauh di luar lookback dilewati).");
+   {
+      const double u0 = ComputeU();
+      if(ChartVisualsOn()) Print("PAC U (Anchor->Entry) sumber: ", USourceText(), ", saat ini = ",
+            DoubleToString(u0 / PipSize(), 1), " pip. BREAKOUT: Buy Atap+U / Sell Lantai-U. Anchor->CL=", InpCLPercentArea,
+            "% Anchor->TP=", InpTPPercentArea, "% Anchor->SL=", InpSLPercentArea, "% dari U.");
+   }
+
+   g_usedTF = DetectionTF();
+   ScanAndDraw();
+   g_lastBarTime = iTime(_Symbol, g_usedTF, 0);
+   ManageOrders();
+   PaintChart();
+   if(ChartVisualsOn())
+     {
+      if(!EventSetTimer(1))
+         if(ChartVisualsOn()) Print("PAC: EventSetTimer gagal — reentry TP window hanya saat ada tick.");
+     }
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   EventKillTimer();
+   DeleteMarks();
+   DeleteNewsMarks();
+   DeleteHourMarks();
+   if(g_atrHandle != INVALID_HANDLE)
+     {
+      IndicatorRelease(g_atrHandle);
+      g_atrHandle = INVALID_HANDLE;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void OnTimer()
+  {
+   ManageFast();
+  }
+
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   const ENUM_TIMEFRAMES tf = DetectionTF();
+   if(tf != g_usedTF)
+     {
+      DeleteMarks();
+      g_usedTF      = tf;
+      g_lastBarTime = 0;
+     }
+
+   const datetime barTime = iTime(_Symbol, tf, 0);
+   const bool newBar = (barTime != 0 && barTime != g_lastBarTime);
+   if(newBar)
+      g_lastBarTime = barTime;
+
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   ApplyNewsFilter();
+   ApplyHourFilter();
+   if(newBar)
+      RefreshGroupsAndClcc();
+   g_inRefresh = false;
+
+   if(newBar)
+      ScanAndDraw();
+
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   if(newBar)
+      ApplyPivotCapAndSlots();
+   ProcessTpBatches();
+   g_inRefresh = false;
+
+   if(newBar)
+      PaintChart();
+  }
+
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+  {
+   HandleTradeTransaction(trans);
+  }
+
+//+------------------------------------------------------------------+
+void ScanAndDraw()
+  {
+   if(InpDebugChartObj && ChartVisualsOn())
+      Print("PAC obj ==== ", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES), " ====");
+   ScanPivots();
+   ScanBases();
+   ScanSrZones();
+   MarkWeakness();
+   MarkControls();
+   ApplyClccToZones();
+   ApplyTpAdaptive();
+   DrawBases();
+   DrawAtapLantai();
+  }
+
+//+------------------------------------------------------------------+
+bool IsGreen(const MqlRates &r) { return(r.close > r.open); }
+bool IsRed(const MqlRates &r)   { return(r.close < r.open); }
+bool IsBase(const MqlRates &r)
+  {
+   return(MathAbs(r.close - r.open) <= BASE_BODY_RATIO * (r.high - r.low));
+  }
+bool IsImpulse(const MqlRates &r)
+  {
+   const double range = r.high - r.low;
+   if(range <= 0.0)
+      return(false);
+   const double ratio = MathMax(IMPULSE_BODY_PCT, 0) / 100.0;
+   return(MathAbs(r.close - r.open) >= ratio * range);
+  }
+bool IsRally(const MqlRates &r) { return(IsGreen(r) && IsImpulse(r)); }
+bool IsDrop(const MqlRates &r)  { return(IsRed(r) && IsImpulse(r)); }
+
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   if(id == CHARTEVENT_CHART_CHANGE)
+     {
+      if(MQLInfoInteger(MQL_TESTER) != 0)
+         return;
+      DrawPivots();
+      ChartRedraw(0);
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool IsGoldSymbol()
+  {
+   string s = _Symbol;
+   StringToUpper(s);
+   if(StringFind(s, "XAU") >= 0 || StringFind(s, "GOLD") >= 0)
+      return(true);
+   string base = SymbolInfoString(_Symbol, SYMBOL_CURRENCY_BASE);
+   StringToUpper(base);
+   return(base == "XAU" || base == "GOLD");
+  }
+
+//+------------------------------------------------------------------+
+double PipSize()
+  {
+   const double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   const int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   // Emas: 1 pip = 0.10 (FundedNext & HFM 2-digit: 10 point). Bukan 1 point.
+   if(IsGoldSymbol())
+      return((digits == 3) ? (pt * 100.0) : (pt * 10.0));
+   if(digits == 3 || digits == 5)
+      return(pt * 10.0);
+   return(pt);
+  }
+
+//+------------------------------------------------------------------+
+//| U = jarak Anchor->Entry, dihitung fresh tiap dipanggil. Grup yang |
+//| sudah berpending/posisi dikunci ke lantai/atap: ATR baru tidak   |
+//| boleh menghapus-pasang ulang. Reentry setelah TP boleh U baru.  |
+//+------------------------------------------------------------------+
+double ComputeU()
+  {
+   if(UUsesAtr() && g_atrHandle != INVALID_HANDLE)
+     {
+      double buf[];
+      if(CopyBuffer(g_atrHandle, 0, 1, 1, buf) > 0 && buf[0] > 0.0)
+        {
+         const double u = buf[0] * MathMax(InpUAtrPercent, 0) / 100.0;
+         if(u > 0.0)
+            return(u);
+        }
+     }
+   return(MathMax(InpUPips, 1) * PipSize());
+  }
+
+//+------------------------------------------------------------------+
+double UClDist(const double u) { return(u * MathMax(InpCLPercentArea, 0) / 100.0); }
+double UTpDist(const double u) { return(u * MathMax(InpTPPercentArea, 0) / 100.0); }
+double USlDist(const double u) { return(u * MathMax(InpSLPercentArea, 0) / 100.0); }
+
+//+------------------------------------------------------------------+
+//| TP mandiri (Anchor +/- Anchor->TP).                               |
+//+------------------------------------------------------------------+
+double MandiriTp(const bool isBuy, const double extreme, const double u)
+  {
+   return(isBuy ? extreme + UTpDist(u) : extreme - UTpDist(u));
+  }
+
+//+------------------------------------------------------------------+
+//| Auto Pasangan: titik tengah valid jika 2U < jarak Atap-Lantai    |
+//| dan jarak masih <= 2x Anchor->TP (kalau lebih lebar, mandiri).   |
+//+------------------------------------------------------------------+
+bool GapAllowsPasangan(const double gap, const double u)
+  {
+   if(u <= 0.0 || gap <= 0.0)
+      return(false);
+   if(gap <= 2.0 * u)
+      return(false);
+   if(gap > 2.0 * UTpDist(u))
+      return(false);
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+bool AutoPairZones(const double atap, const double lantai, const double u)
+  {
+   // Breakout menjauh dari zona: TP tengah Atap-Lantai berlawanan arah trade.
+   if(atap <= lantai || u <= 0.0)
+      return(false);
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool PivotLeftOk(const MqlRates &rates[], const int cand, const bool isBuy)
+  {
+   if(cand < 1)
+      return(false);
+   int found = 0;
+   for(int j = cand - 1; j >= 0; j--)
+     {
+      if(isBuy)
+        {
+         if(rates[j].low < rates[cand].low)
+            return(false);
+         if(IsGreen(rates[j]) && rates[j].open > rates[cand].close)
+           {
+            found++;
+            if(found >= 2)
+               return(true);
+           }
+        }
+      else
+        {
+         if(rates[j].high > rates[cand].high)
+            return(false);
+         if(IsRed(rates[j]) && rates[j].open < rates[cand].close)
+           {
+            found++;
+            if(found >= 2)
+               return(true);
+           }
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool TrySetPivotCand(const MqlRates &rates[], const int i, const bool isBuy,
+                     int &cand, int &count, datetime &conf1)
+  {
+   if(PivotKetatOn() && !PivotLeftOk(rates, i, isBuy))
+     {
+      cand  = -1;
+      count = 0;
+      conf1 = 0;
+      return(false);
+     }
+   cand  = i;
+   count = 0;
+   conf1 = 0;
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+void AddPivot(const MqlRates &bar, const ENUM_PIVOT_TYPE type,
+              const datetime c1, const datetime c2)
+  {
+   const int n = ArraySize(g_pivots);
+   ArrayResize(g_pivots, n + 1, 64);
+   g_pivots[n].time     = bar.time;
+   g_pivots[n].open     = bar.open;
+   g_pivots[n].high     = bar.high;
+   g_pivots[n].low      = bar.low;
+   g_pivots[n].close    = bar.close;
+   g_pivots[n].type     = type;
+   g_pivots[n].confirm1 = c1;
+   g_pivots[n].confirm2 = c2;
+  }
+
+//+------------------------------------------------------------------+
+void ScanPivots()
+  {
+   ArrayResize(g_pivots, 0);
+
+   const int lookback = MathMax(InpLookback, 4);
+   MqlRates rates[];
+   const int copied = CopyRates(_Symbol, DetectionTF(), 0, lookback, rates);
+   if(copied < 4)
+      return;
+   ArraySetAsSeries(rates, false);
+
+   const int lastClosed = copied - 2;
+
+   int      buyCand   = -1;
+   int      buyGreens = 0;
+   datetime buyConf1  = 0;
+
+   int      sellCand = -1;
+   int      sellReds = 0;
+   datetime sellConf1 = 0;
+
+   for(int i = 1; i <= lastClosed; i++)
+     {
+      //--- Pivot Buy: rolling candidate, 2 candle hijau konfirmasi
+      if(buyCand >= 0)
+        {
+         if(rates[i].low < rates[buyCand].low)
+            TrySetPivotCand(rates, i, true, buyCand, buyGreens, buyConf1);
+         else if(IsGreen(rates[i]) && rates[i].open > rates[buyCand].close)
+           {
+            buyGreens++;
+            if(buyGreens == 1)
+               buyConf1 = rates[i].time;
+            else
+              {
+               AddPivot(rates[buyCand], PIVOT_BUY, buyConf1, rates[i].time);
+               buyCand   = -1;
+               buyGreens = 0;
+               buyConf1  = 0;
+              }
+           }
+        }
+      if(buyCand < 0 && rates[i].low < rates[i - 1].low)
+         TrySetPivotCand(rates, i, true, buyCand, buyGreens, buyConf1);
+
+      //--- Pivot Sell: cermin dari Buy
+      if(sellCand >= 0)
+        {
+         if(rates[i].high > rates[sellCand].high)
+            TrySetPivotCand(rates, i, false, sellCand, sellReds, sellConf1);
+         else if(IsRed(rates[i]) && rates[i].open < rates[sellCand].close)
+           {
+            sellReds++;
+            if(sellReds == 1)
+               sellConf1 = rates[i].time;
+            else
+              {
+               AddPivot(rates[sellCand], PIVOT_SELL, sellConf1, rates[i].time);
+               sellCand  = -1;
+               sellReds  = 0;
+               sellConf1 = 0;
+              }
+           }
+        }
+      if(sellCand < 0 && rates[i].high > rates[i - 1].high)
+         TrySetPivotCand(rates, i, false, sellCand, sellReds, sellConf1);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void AddBase(const MqlRates &bar)
+  {
+   const int n = ArraySize(g_bases);
+   ArrayResize(g_bases, n + 1, 64);
+   g_bases[n].time  = bar.time;
+   g_bases[n].open  = bar.open;
+   g_bases[n].high  = bar.high;
+   g_bases[n].low   = bar.low;
+   g_bases[n].close = bar.close;
+  }
+
+//+------------------------------------------------------------------+
+void ScanBases()
+  {
+   ArrayResize(g_bases, 0);
+
+   const int lookback = MathMax(InpLookback, 4);
+   MqlRates rates[];
+   const int copied = CopyRates(_Symbol, DetectionTF(), 0, lookback, rates);
+   if(copied < 4)
+      return;
+   ArraySetAsSeries(rates, false);
+
+   const int lastClosed = copied - 2;
+   for(int i = 0; i <= lastClosed; i++)
+     {
+      if(IsBase(rates[i]))
+         AddBase(rates[i]);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void CoverAdd(double &cLo[], double &cHi[], int &n, double a, double b)
+  {
+   const double eps = _Point;
+   int i = 0;
+   while(i < n)
+     {
+      if(b + eps < cLo[i] || a - eps > cHi[i])
+        {
+         i++;
+         continue;
+        }
+      a = MathMin(a, cLo[i]);
+      b = MathMax(b, cHi[i]);
+      for(int k = i; k < n - 1; k++)
+        {
+         cLo[k] = cLo[k + 1];
+         cHi[k] = cHi[k + 1];
+        }
+      n--;
+      i = 0;
+     }
+   ArrayResize(cLo, n + 1);
+   ArrayResize(cHi, n + 1);
+   cLo[n] = a;
+   cHi[n] = b;
+   n++;
+  }
+
+//+------------------------------------------------------------------+
+void CoverClipAdd(double &cLo[], double &cHi[], int &n,
+                  const double a, const double b,
+                  const double zoneLow, const double zoneHigh)
+  {
+   const double lo = MathMax(MathMin(a, b), zoneLow);
+   const double hi = MathMin(MathMax(a, b), zoneHigh);
+   if(hi > lo)
+      CoverAdd(cLo, cHi, n, lo, hi);
+  }
+
+//+------------------------------------------------------------------+
+bool CoverFull(const double &cLo[], const double &cHi[], const int n,
+               const double zoneLow, const double zoneHigh)
+  {
+   if(n <= 0)
+      return(false);
+
+   const double eps = _Point;
+   int order[];
+   ArrayResize(order, n);
+   for(int i = 0; i < n; i++)
+      order[i] = i;
+   for(int i = 0; i < n - 1; i++)
+      for(int k = i + 1; k < n; k++)
+         if(cLo[order[k]] < cLo[order[i]])
+           {
+            const int tmp = order[i];
+            order[i] = order[k];
+            order[k] = tmp;
+           }
+
+   double curLo = cLo[order[0]];
+   double curHi = cHi[order[0]];
+   for(int i = 1; i < n; i++)
+     {
+      const int k = order[i];
+      if(cLo[k] <= curHi + eps)
+         curHi = MathMax(curHi, cHi[k]);
+      else
+        {
+         if(curLo <= zoneLow + eps && curHi >= zoneHigh - eps)
+            return(true);
+         curLo = cLo[k];
+         curHi = cHi[k];
+        }
+     }
+   return(curLo <= zoneLow + eps && curHi >= zoneHigh - eps);
+  }
+
+//+------------------------------------------------------------------+
+datetime ZoneRightTime(const MqlRates &rates[], const int copied, const int lastBaseIdx,
+                       const double zoneHigh, const double zoneLow, const bool isSupport)
+  {
+   const int start = lastBaseIdx + 2; // skip Base + leg (C3)
+   if(start >= copied)
+      return(rates[copied - 1].time);
+
+   double cLo[], cHi[];
+   int n = 0;
+   bool painting = false;
+   double prevClose = 0.0;
+
+   for(int j = start; j < copied; j++)
+     {
+      if(!painting)
+        {
+         const bool returned = isSupport
+                               ? (rates[j].close < zoneHigh)
+                               : (rates[j].close > zoneLow);
+         if(!returned)
+            continue;
+         painting = true;
+        }
+      else
+         CoverClipAdd(cLo, cHi, n, prevClose, rates[j].open, zoneLow, zoneHigh);
+
+      CoverClipAdd(cLo, cHi, n,
+                   MathMin(rates[j].open, rates[j].close),
+                   MathMax(rates[j].open, rates[j].close),
+                   zoneLow, zoneHigh);
+      prevClose = rates[j].close;
+
+      if(CoverFull(cLo, cHi, n, zoneLow, zoneHigh))
+         return(rates[j].time);
+     }
+   return(rates[copied - 1].time);
+  }
+
+//+------------------------------------------------------------------+
+void AddSrZone(const datetime left, const datetime right, const datetime lastBase,
+               const double hi, const double lo, const bool isSupport)
+  {
+   const int n = ArraySize(g_zones);
+   ArrayResize(g_zones, n + 1, 32);
+   g_zones[n].left      = left;
+   g_zones[n].right     = right;
+   g_zones[n].lastBase  = lastBase;
+   g_zones[n].high      = hi;
+   g_zones[n].low       = lo;
+   g_zones[n].isSupport = isSupport;
+   g_zones[n].isControl    = false;
+   g_zones[n].isWeak       = false;
+   g_zones[n].pivotTime    = 0;
+   g_zones[n].pivotTouches = 0;
+  }
+
+//+------------------------------------------------------------------+
+void ScanSrZones()
+  {
+   ArrayResize(g_zones, 0);
+
+   const int n = ArraySize(g_bases);
+   if(n <= 0)
+      return;
+
+   const int lookback = MathMax(InpLookback, 4);
+   MqlRates rates[];
+   const int copied = CopyRates(_Symbol, DetectionTF(), 0, lookback, rates);
+   if(copied < 4)
+      return;
+   ArraySetAsSeries(rates, false);
+
+   int idx[];
+   ArrayResize(idx, n);
+   int ri = 0;
+   for(int b = 0; b < n; b++)
+     {
+      while(ri < copied && rates[ri].time < g_bases[b].time)
+         ri++;
+      idx[b] = (ri < copied && rates[ri].time == g_bases[b].time) ? ri : -1;
+     }
+
+   int s = 0;
+   while(s < n)
+     {
+      if(idx[s] < 0)
+        {
+         s++;
+         continue;
+        }
+      int e = s;
+      double hi = g_bases[s].high;
+      double lo = g_bases[s].low;
+      while(e + 1 < n && idx[e] >= 0 && idx[e + 1] == idx[e] + 1)
+        {
+         e++;
+         if(g_bases[e].high > hi)
+            hi = g_bases[e].high;
+         if(g_bases[e].low < lo)
+            lo = g_bases[e].low;
+        }
+
+      const int count = e - s + 1;
+      const int leftIdx = idx[s];
+      const int rightIdx = idx[e];
+      const int lastClosed = copied - 2;
+      const int maxGroup = MathMax(InpMaxBaseCandles, 1);
+      const bool sizedOk = (count >= 1 && count <= maxGroup);
+      const bool legsOk  = (leftIdx >= 1 && rightIdx + 1 <= lastClosed);
+
+      if(sizedOk && legsOk)
+        {
+         const MqlRates c1 = rates[leftIdx - 1];
+         const MqlRates c3 = rates[rightIdx + 1];
+         if(IsRally(c1) && IsRally(c3) && c3.close > hi)
+            AddSrZone(g_bases[s].time,
+                      ZoneRightTime(rates, copied, rightIdx, hi, lo, true),
+                      g_bases[e].time, hi, lo, true);
+         else if(IsDrop(c1) && IsDrop(c3) && c3.close < lo)
+            AddSrZone(g_bases[s].time,
+                      ZoneRightTime(rates, copied, rightIdx, hi, lo, false),
+                      g_bases[e].time, hi, lo, false);
+        }
+      s = e + 1;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void MarkWeakness()
+  {
+   const int nz = ArraySize(g_zones);
+   if(nz <= 0)
+      return;
+
+   const int lookback = MathMax(InpLookback, 4);
+   MqlRates rates[];
+   const int copied = CopyRates(_Symbol, DetectionTF(), 0, lookback, rates);
+   if(copied < 4)
+      return;
+   ArraySetAsSeries(rates, false);
+
+   const int lastClosed = copied - 2;
+
+   for(int z = 0; z < nz; z++)
+     {
+      g_zones[z].isWeak = false;
+      int lastIdx = -1;
+      for(int i = 0; i < copied; i++)
+        {
+         if(rates[i].time == g_zones[z].lastBase)
+           {
+            lastIdx = i;
+            break;
+           }
+        }
+      if(lastIdx < 0)
+         continue;
+
+      for(int j = lastIdx + 2; j <= lastClosed; j++)
+        {
+         const double bodyLo = MathMin(rates[j].open, rates[j].close);
+         const double bodyHi = MathMax(rates[j].open, rates[j].close);
+         if(g_zones[z].isSupport)
+           {
+            if(bodyLo <= g_zones[z].low)
+              {
+               g_zones[z].isWeak = true;
+               break;
+              }
+           }
+         else if(bodyHi >= g_zones[z].high)
+           {
+            g_zones[z].isWeak = true;
+            break;
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool RangesOverlap(const double aHi, const double aLo, const double bHi, const double bLo)
+  {
+   return(aLo <= bHi && aHi >= bLo);
+  }
+
+//+------------------------------------------------------------------+
+//| Pivot di jendela PAC terbuka: setelah Base, sampai cat penuh.   |
+//| Candle penutup cat (zone.right) masih dihitung. Setelah itu     |
+//| pivot di area harga yang sama = fresh, bukan sentuhan zona ini. |
+//+------------------------------------------------------------------+
+bool PivotInOpenPacWindow(const Pivot &p, const SrZone &z)
+  {
+   return(p.time > z.lastBase && p.time <= z.right);
+  }
+
+//+------------------------------------------------------------------+
+void MarkControls()
+  {
+   const int nz = ArraySize(g_zones);
+   const int np = ArraySize(g_pivots);
+   for(int z = 0; z < nz; z++)
+     {
+      g_zones[z].isControl    = false;
+      g_zones[z].pivotTime    = 0;
+      g_zones[z].pivotTouches = 0;
+      const ENUM_PIVOT_TYPE need = g_zones[z].isSupport ? PIVOT_BUY : PIVOT_SELL;
+      datetime lastPt = 0;
+      int touches = 0;
+      for(int p = 0; p < np; p++)
+        {
+         if(g_pivots[p].type != need)
+            continue;
+         if(!PivotInOpenPacWindow(g_pivots[p], g_zones[z]))
+            continue;
+         if(!RangesOverlap(g_pivots[p].high, g_pivots[p].low,
+                           g_zones[z].high, g_zones[z].low))
+            continue;
+         touches++;
+         lastPt = g_pivots[p].time;
+        }
+      if(touches <= 0)
+         continue;
+      g_zones[z].isControl    = true;
+      g_zones[z].pivotTime    = lastPt;
+      g_zones[z].pivotTouches = touches;
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool PivotHitsAnchor(const Pivot &p)
+  {
+   const bool isBuy = (p.type == PIVOT_BUY);
+   const double eps = MathMax(PipSize() * 0.25, _Point);
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport != isBuy)
+         continue;
+      if(!PivotInOpenPacWindow(p, g_zones[z]))
+         continue;
+      // Overlap High-Low — termasuk zona kadaluarsa/Control Off, selama
+      // masih di dalam jendela cat (sampai zone.right).
+      if(p.low <= g_zones[z].high + eps && p.high >= g_zones[z].low - eps)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+int PivotArrowCode(const bool isBuy)
+  {
+   int code = (int)InpPivotSymbol;
+   if(!isBuy && (InpPivotSymbol == MARK_ARROW || InpPivotSymbol == MARK_TRIANGLE))
+      code++;
+   return(code);
+  }
+
+//+------------------------------------------------------------------+
+int PivotGlyphPadPx()
+  {
+   if(InpPivotSymbol == MARK_ARROW || InpPivotSymbol == MARK_TRIANGLE)
+      return(1);
+   if(InpPivotSymbol == MARK_DOT)
+      return(2);
+   return(3);
+  }
+
+//+------------------------------------------------------------------+
+double PivotMarkPrice(const bool isBuy, const datetime t, const double wick)
+  {
+   if(MQLInfoInteger(MQL_TESTER) != 0)
+      return(wick);
+   int x = 0, y = 0;
+   if(!ChartTimePriceToXY(0, 0, t, wick, x, y))
+      return(wick);
+   const int pad = PivotGlyphPadPx();
+   const int yObj = isBuy ? (y - pad) : (y + pad);
+   int sub = 0;
+   datetime td = 0;
+   double pr = 0.0;
+   if(!ChartXYToTimePrice(0, x, yObj, sub, td, pr) || pr <= 0.0)
+      return(wick);
+   return(pr);
+  }
+
+//+------------------------------------------------------------------+
+void DrawPivots()
+  {
+   if(!ChartVisualsOn() || g_drawingPivots)
+      return;
+   g_drawingPivots = true;
+   ObjectsDeleteAll(0, PREFIX_PB);
+   ObjectsDeleteAll(0, PREFIX_PS);
+
+   const double gap = MathMax(InpGapPips, 0) * PipSize();
+   const int n = ArraySize(g_pivots);
+   for(int i = 0; i < n; i++)
+      CreateArrow(g_pivots[i], gap);
+   g_drawingPivots = false;
+  }
+
+//+------------------------------------------------------------------+
+void CreateArrow(const Pivot &p, const double gap)
+  {
+   const bool isBuy = (p.type == PIVOT_BUY);
+   const string name = (isBuy ? PREFIX_PB : PREFIX_PS) + IntegerToString((long)p.time);
+   const double wick = isBuy ? p.low : p.high;
+   double price = PivotMarkPrice(isBuy, p.time, wick);
+   if(gap > 0.0)
+      price = isBuy ? (price - gap) : (price + gap);
+
+   if(!ObjectCreate(0, name, OBJ_ARROW, 0, p.time, price))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_ARROWCODE, PivotArrowCode(isBuy));
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR, isBuy ? ANCHOR_TOP : ANCHOR_BOTTOM);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, PivotHitsAnchor(p) ? clrRed : InpPivotColor);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 100);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP,
+                   StringFormat("%s ke-%d\n%s\nO=%s H=%s L=%s C=%s\nConf: %s | %s",
+                                isBuy ? "PAC Pivot Buy" : "PAC Pivot Sell",
+                                PivotRank(p.time, p.type),
+                                TimeToString(p.time, TIME_DATE | TIME_MINUTES),
+                                DoubleToString(p.open, _Digits),
+                                DoubleToString(p.high, _Digits),
+                                DoubleToString(p.low, _Digits),
+                                DoubleToString(p.close, _Digits),
+                                TimeToString(p.confirm1, TIME_DATE | TIME_MINUTES),
+                                TimeToString(p.confirm2, TIME_DATE | TIME_MINUTES)));
+   const bool hit = PivotHitsAnchor(p);
+   PacObjLog(isBuy ? "pivot-buy" : "pivot-sell", name, p.time, price,
+             (hit ? "MERAH hit-zona" : "kuning") +
+             " H=" + DoubleToString(p.high, _Digits) +
+             " L=" + DoubleToString(p.low, _Digits));
+  }
+
+//+------------------------------------------------------------------+
+void DrawBases()
+  {
+   if(!ChartVisualsOn())
+      return;
+   ObjectsDeleteAll(0, PREFIX_BASE);
+   ObjectsDeleteAll(0, PREFIX_RBR);
+   ObjectsDeleteAll(0, PREFIX_DBD);
+
+   const int n = ArraySize(g_bases);
+   for(int i = 0; i < n; i++)
+      CreateBaseLine(g_bases[i]);
+  }
+
+//+------------------------------------------------------------------+
+void CreateBaseLine(const Base &b)
+  {
+   const string name = PREFIX_BASE + IntegerToString((long)b.time);
+
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, b.time, b.high, b.time, b.low))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, InpBaseColor);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 3);
+   ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP,
+                   StringFormat("PAC Candle Base\n%s\nO=%s H=%s L=%s C=%s",
+                                TimeToString(b.time, TIME_DATE | TIME_MINUTES),
+                                DoubleToString(b.open, _Digits),
+                                DoubleToString(b.high, _Digits),
+                                DoubleToString(b.low, _Digits),
+                                DoubleToString(b.close, _Digits)));
+   PacObjLog("base", name, b.time, b.close,
+             "H=" + DoubleToString(b.high, _Digits) +
+             " L=" + DoubleToString(b.low, _Digits));
+  }
+
+//+------------------------------------------------------------------+
+void DrawSrZones()
+  {
+   if(!ChartVisualsOn())
+      return;
+   ObjectsDeleteAll(0, PREFIX_SUP);
+   ObjectsDeleteAll(0, PREFIX_RES);
+
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+      CreateSrRect(g_zones[i]);
+  }
+
+//+------------------------------------------------------------------+
+void CreateSrRect(const SrZone &z)
+  {
+   const bool aktif  = (z.isControl && !z.isWeak);
+   const bool off    = (z.isControl && z.isWeak);
+   const string name = (z.isSupport ? PREFIX_SUP : PREFIX_RES) + IntegerToString((long)z.left);
+   const string side = z.isSupport ? "Lantai" : "Atap";
+   if(InpChartLiteMode && off)
+     {
+      PacObjLog("skip-off", name, z.left, z.low,
+                side + " Control Off disembunyikan lite H=" +
+                DoubleToString(z.high, _Digits) + " L=" + DoubleToString(z.low, _Digits));
+      return;
+     }
+   const int armedRank = ArmedRankForZone(z);
+   const bool armed = (armedRank > 0);
+   const color zclr = armed ? GroupColor(!z.isSupport, armedRank)
+                            : (z.isSupport ? InpSupportColor : InpResistColor);
+
+   if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, z.left, z.high, z.right, z.low))
+      return;
+
+   ObjectSetInteger(0, name, OBJPROP_COLOR, zclr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, (armed || aktif) ? STYLE_SOLID : (off ? STYLE_DOT : STYLE_DASH));
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, armed ? 2 : (aktif ? 1 : 1));
+   ObjectSetInteger(0, name, OBJPROP_FILL, armed);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+
+   string tip = "PAC Control Standby " + side;
+   if(armed)
+      tip = StringFormat("PAB Grup %s%d %s", z.isSupport ? "S" : "B", armedRank, side);
+   else if(aktif)
+      tip = "PAC Control Aktif " + side;
+   else if(off)
+      tip = "PAC Control Off " + side;
+   if(z.isControl && z.pivotTime > 0)
+     {
+      const int rk = PivotRank(z.pivotTime, z.isSupport ? PIVOT_BUY : PIVOT_SELL);
+      tip += "\nPivot ke-" + IntegerToString(rk) + "  " +
+             TimeToString(z.pivotTime, TIME_DATE | TIME_MINUTES);
+      tip += "\nSentuhan pivot " + IntegerToString(z.pivotTouches) + "/" +
+             IntegerToString(MaxPivotTouches());
+     }
+   ObjectSetString(0, name, OBJPROP_TOOLTIP,
+                   StringFormat("%s\n%s -> %s\nH=%s L=%s",
+                                tip,
+                                TimeToString(z.left, TIME_DATE | TIME_MINUTES),
+                                TimeToString(z.right, TIME_DATE | TIME_MINUTES),
+                                DoubleToString(z.high, _Digits),
+                                DoubleToString(z.low, _Digits)));
+   string st = "standby";
+   if(armed)
+      st = StringFormat("armed %s%d", z.isSupport ? "S" : "B", armedRank);
+   else if(aktif)
+      st = "aktif";
+   else if(off)
+      st = "off";
+   PacObjLog("zona", name, z.left, z.low,
+             side + " " + st +
+             " H=" + DoubleToString(z.high, _Digits) +
+             " L=" + DoubleToString(z.low, _Digits) +
+             " -> " + TimeToString(z.right, TIME_DATE | TIME_MINUTES));
+  }
+
+//+------------------------------------------------------------------+
+void CreateLevelLine(const string name, const double price, const color clr, const string tip,
+                     const string label,
+                     const ENUM_LINE_STYLE style = STYLE_SOLID, const int width = 2)
+  {
+   if(price <= 0.0)
+      return;
+   if(!ObjectCreate(0, name, OBJ_HLINE, 0, 0, price))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   PacObjLog("hline", name, 0, price, (label == "" ? tip : label));
+   if(label == "")
+      return;
+
+   datetime t = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(t <= 0)
+      t = TimeCurrent();
+   t += (datetime)PeriodSeconds();
+   const string lb = name + "_LB";
+   if(!ObjectCreate(0, lb, OBJ_TEXT, 0, t, price))
+      return;
+   ObjectSetString(0, lb, OBJPROP_TEXT, label);
+   ObjectSetString(0, lb, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, lb, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, lb, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, lb, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, lb, OBJPROP_BACK, false);
+   ObjectSetInteger(0, lb, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, lb, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, lb, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, lb, OBJPROP_TOOLTIP, tip);
+   PacObjLog("hline-lb", lb, t, price, label);
+  }
+
+//+------------------------------------------------------------------+
+color GroupColor(const bool isBuy, const int rank)
+  {
+   if(isBuy)
+     {
+      if(rank <= 1)
+         return(clrLime);
+      if(rank == 2)
+         return(InpSupportColor);
+      return(clrDarkGreen);
+     }
+   if(rank <= 1)
+      return(clrRed);
+   if(rank == 2)
+      return(clrDarkOrange);
+   return(clrMaroon);
+  }
+
+//+------------------------------------------------------------------+
+int ArmedRankForZone(const SrZone &z)
+  {
+   const double ext = z.isSupport ? z.low : z.high;
+   const int n = ArraySize(g_viz);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_viz[i].isBuy == z.isSupport)
+         continue;
+      if(g_viz[i].anchor > 0.0 && SameCl(g_viz[i].anchor, ext))
+         return(g_viz[i].rank);
+     }
+   return(0);
+  }
+
+//+------------------------------------------------------------------+
+void CreateLevelSeg(const string name, const double price, const datetime tFrom,
+                    const color clr, const string tip, const string label,
+                    const ENUM_LINE_STYLE style, const int width)
+  {
+   if(price <= 0.0)
+      return;
+   datetime t2 = iTime(_Symbol, PERIOD_CURRENT, 0);
+   if(t2 <= 0)
+      t2 = TimeCurrent();
+   datetime t1 = tFrom;
+   if(t1 <= 0)
+      t1 = t2 - (datetime)(PeriodSeconds() * 20);
+   if(t2 <= t1)
+      t2 = t1 + (datetime)PeriodSeconds();
+   if(!ObjectCreate(0, name, OBJ_TREND, 0, t1, price, t2, price))
+      return;
+   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+   ObjectSetInteger(0, name, OBJPROP_RAY_LEFT, false);
+   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, name, OBJPROP_TOOLTIP, tip);
+   PacObjLog("level", name, t1, price, (label == "" ? tip : label));
+   if(label == "")
+      return;
+   datetime tLb = t2 + (datetime)PeriodSeconds();
+   const string lb = name + "_LB";
+   if(!ObjectCreate(0, lb, OBJ_TEXT, 0, tLb, price))
+      return;
+   ObjectSetString(0, lb, OBJPROP_TEXT, label);
+   ObjectSetString(0, lb, OBJPROP_FONT, "Arial");
+   ObjectSetInteger(0, lb, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, lb, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, lb, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(0, lb, OBJPROP_BACK, false);
+   ObjectSetInteger(0, lb, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, lb, OBJPROP_HIDDEN, true);
+   ObjectSetInteger(0, lb, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetString(0, lb, OBJPROP_TOOLTIP, tip);
+   PacObjLog("level-lb", lb, tLb, price, label);
+  }
+
+//+------------------------------------------------------------------+
+int PivotRank(const datetime t, const ENUM_PIVOT_TYPE type)
+  {
+   if(t <= 0)
+      return(0);
+   int rank = 0;
+   const int np = ArraySize(g_pivots);
+   for(int i = 0; i < np; i++)
+     {
+      if(g_pivots[i].type != type)
+         continue;
+      if(g_pivots[i].time <= t)
+         rank++;
+     }
+   return(rank);
+  }
+
+//+------------------------------------------------------------------+
+bool WasClcc(const bool isBuy, const double anchor)
+  {
+   if(anchor <= 0.0)
+      return(false);
+   const int n = ArraySize(g_clccCl);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_clccBuy[i] == isBuy && SameCl(g_clccCl[i], anchor))
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void RememberClcc(const PacGroup &g)
+  {
+   const bool isBuy = (g.direction > 0);
+   double anchor = g.anchor;
+   if(anchor <= 0.0)
+     {
+      const int z = FindZoneIndexForFrozenCl(isBuy, g.clPrice);
+      if(z >= 0)
+         anchor = ZoneExtreme(isBuy, z);
+      else
+         anchor = isBuy ? (g.clPrice + UClDist(ComputeU()))
+                         : (g.clPrice - UClDist(ComputeU()));
+     }
+   if(WasClcc(isBuy, anchor))
+      return;
+   const int n = ArraySize(g_clccCl);
+   ArrayResize(g_clccCl, n + 1);
+   ArrayResize(g_clccBuy, n + 1);
+   g_clccCl[n]  = NormalizePrice(anchor);
+   g_clccBuy[n] = isBuy;
+  }
+
+//+------------------------------------------------------------------+
+void ApplyClccToZones()
+  {
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+     {
+      const bool isBuy = !g_zones[i].isSupport;
+      const double anchor = isBuy ? g_zones[i].high : g_zones[i].low;
+      if(WasClcc(isBuy, anchor))
+         g_zones[i].isWeak = true;
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool ZoneOrderEligible(const SrZone &z)
+  {
+   if(!z.isControl || z.isWeak)
+      return(false);
+   if(z.pivotTouches >= MaxPivotTouches())
+      return(false);
+   const bool isBuy = !z.isSupport;
+   const double anchor = isBuy ? z.high : z.low;
+   return(!WasClcc(isBuy, anchor));
+  }
+
+//+------------------------------------------------------------------+
+//| Cari zona standby (belum isControl, bukan isWeak/expired) yang    |
+//| beririsan di antara Entry dan TP (current, bisa sudah pernah      |
+//| menyempit sebelumnya) suatu posisi/pending. Ambil yang PALING     |
+//| DEKAT ke Entry -- itu yang jadi TP baru. Return 0 kalau tidak ada |
+//| kandidat (TP tidak berubah). Fungsi ini murni satu arah: kandidat |
+//| yang diterima selalu lebih dekat ke Entry daripada curTp, jadi TP |
+//| otomatis tidak pernah melebar lagi walau dipanggil berulang.      |
+//+------------------------------------------------------------------+
+double TightestStandbyTp(const bool isBuy, const double entry, const double curTp)
+  {
+   if(entry <= 0.0 || curTp <= 0.0)
+      return(0.0);
+   double best = 0.0;
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+     {
+      const SrZone z = g_zones[i];
+      if(z.isControl || z.isWeak)
+         continue; // cuma zona standby, expired diabaikan
+      if(isBuy)
+        {
+         const double edge = z.low; // sisi zona yg duluan ketemu harga saat naik dari Entry
+         if(edge <= entry || edge >= curTp)
+            continue;
+         if(best <= 0.0 || edge < best)
+            best = edge;
+        }
+      else
+        {
+         const double edge = z.high; // sisi zona yg duluan ketemu harga saat turun dari Entry
+         if(edge >= entry || edge <= curTp)
+            continue;
+         if(best <= 0.0 || edge > best)
+            best = edge;
+        }
+     }
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+bool TpIsAdaptiveNow(const bool isBuy, const double entry, const double tp)
+  {
+   if(!InpTpAdaptive || entry <= 0.0 || tp <= 0.0)
+      return(false);
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_zones[i].isControl || g_zones[i].isWeak)
+         continue;
+      if(isBuy)
+        {
+         if(g_zones[i].low > entry && SameCl(g_zones[i].low, tp))
+            return(true);
+        }
+      else if(g_zones[i].high < entry && SameCl(g_zones[i].high, tp))
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void ModifyItemTp(const LiveItem &it, const double newTp)
+  {
+   const double tpN = NormalizePrice(newTp);
+   if(it.isPosition)
+     {
+      if(!g_trade.PositionModify(it.ticket, it.sl, tpN) || !TradeOk())
+         if(ChartVisualsOn()) Print("PAC TP adaptif: gagal modif posisi #", it.ticket);
+     }
+   else
+     {
+      if(!g_trade.OrderModify(it.ticket, it.price, it.sl, tpN, ORDER_TIME_GTC, 0) || !TradeOk())
+         if(ChartVisualsOn()) Print("PAC TP adaptif: gagal modif pending #", it.ticket);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Tarik TP tiap grup live yang punya zona standby menghalangi di    |
+//| antara Entry (posisi/pending layer 1) dan TP saat ini. Satu arah  |
+//| (menyempit saja). Lihat TightestStandbyTp soal kenapa TP tidak    |
+//| pernah melebar.                                                   |
+//+------------------------------------------------------------------+
+void ApplyTpAdaptive()
+  {
+   if(!InpTpAdaptive)
+      return;
+   LiveItem items[];
+   CollectItems(items);
+
+   string codes[];
+   double entries[];
+   bool   isBuys[];
+   double curTps[];
+   int    nGroup = 0;
+   for(int i = 0; i < ArraySize(items); i++)
+     {
+      if(!items[i].parsed || items[i].pac.position != 1)
+         continue;
+      int gi = -1;
+      for(int k = 0; k < nGroup; k++)
+        {
+         if(codes[k] == items[i].pac.groupCode)
+           {
+            gi = k;
+            break;
+           }
+        }
+      if(gi < 0)
+        {
+         nGroup++;
+         ArrayResize(codes, nGroup);
+         ArrayResize(entries, nGroup);
+         ArrayResize(isBuys, nGroup);
+         ArrayResize(curTps, nGroup);
+         gi = nGroup - 1;
+         codes[gi] = items[i].pac.groupCode;
+        }
+      entries[gi] = items[i].price;
+      isBuys[gi]  = items[i].pac.isBuy;
+      curTps[gi]  = items[i].tp;
+     }
+
+   for(int g = 0; g < nGroup; g++)
+     {
+      const double newTp = TightestStandbyTp(isBuys[g], entries[g], curTps[g]);
+      if(newTp <= 0.0)
+         continue;
+      for(int i = 0; i < ArraySize(items); i++)
+        {
+         if(!items[i].parsed || items[i].pac.groupCode != codes[g])
+            continue;
+         ModifyItemTp(items[i], newTp);
+        }
+      if(ChartVisualsOn()) Print("PAC TP adaptif: ", codes[g], " TP ditarik ke ", DoubleToString(newTp, _Digits));
+     }
+  }
+
+//+------------------------------------------------------------------+
+int MaxGroupsPerSide()
+  {
+   int n = InpMaxGroupsPerSide;
+   if(n < 1)
+      n = 1;
+   return(n);
+  }
+
+//+------------------------------------------------------------------+
+int MaxPivotTouches()
+  {
+   int n = InpMaxPivotTouches;
+   if(n < 1)
+      n = 1;
+   return(n);
+  }
+
+//+------------------------------------------------------------------+
+void ZoneClTp(const SrZone &z, const double u, double &cl, double &tp)
+  {
+   const double buf = UClDist(u);
+   if(z.isSupport) // sell breakout di bawah Lantai
+     {
+      cl = NormalizePrice(z.low + buf);
+      tp = NormalizePrice(z.low - UTpDist(u));
+     }
+   else // buy breakout di atas Atap
+     {
+      cl = NormalizePrice(z.high - buf);
+      tp = NormalizePrice(z.high + UTpDist(u));
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool ClEntryOverlap(const double clA, const double entryA,
+                    const double clB, const double entryB)
+  {
+   if(clA <= 0.0 || entryA <= 0.0 || clB <= 0.0 || entryB <= 0.0)
+      return(false);
+   const double loA = MathMin(clA, entryA);
+   const double hiA = MathMax(clA, entryA);
+   const double loB = MathMin(clB, entryB);
+   const double hiB = MathMax(clB, entryB);
+   const double eps = MathMax(_Point * 5.0, PipSize() * 0.05);
+   return(loA < hiB - eps && hiA > loB + eps);
+  }
+
+//+------------------------------------------------------------------+
+bool IdxHas(const int &idx[], const int n, const int v)
+  {
+   for(int i = 0; i < n; i++)
+     {
+      if(idx[i] == v)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void CollectLivePositionSlots(const bool wantBuy, LivePosSlot &out[])
+  {
+   ArrayResize(out, 0);
+   const int np = PositionsTotal();
+   for(int i = 0; i < np; i++)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+      PacCmt p;
+      if(!ParsePacCommentEx(PositionGetString(POSITION_COMMENT), p))
+         continue;
+      if(p.isBuy != wantBuy)
+         continue;
+      LivePosSlot s;
+      s.cl      = p.clPrice;
+      s.entry   = PositionGetDouble(POSITION_PRICE_OPEN);
+      s.zoneIdx = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                          PositionGetDouble(POSITION_SL),
+                                          s.entry, p.layerCount, p.position);
+      s.anchor  = (s.zoneIdx >= 0) ? ZoneExtreme(wantBuy, s.zoneIdx)
+                                   : ResolveOrderAnchor(p.isBuy, p.clPrice,
+                                                         PositionGetDouble(POSITION_SL),
+                                                         s.entry, p.layerCount, p.position);
+      const int n = ArraySize(out);
+      ArrayResize(out, n + 1);
+      out[n] = s;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Zona per arah, terdekat ke harga dulu, maks MaxGroupsPerSide.    |
+//| Buy = Atap di atas bid (breakout naik). Sell = Lantai di bawah.  |
+//+------------------------------------------------------------------+
+void CollectNearestZones(const bool wantBuy, const double bid, const double u,
+                         int &idx[], int &nOut)
+  {
+   nOut = 0;
+   ArrayResize(idx, 0);
+   LivePosSlot live[];
+   CollectLivePositionSlots(wantBuy, live);
+   int used = 0;
+   const int nLive = ArraySize(live);
+   for(int i = 0; i < nLive; i++)
+     {
+      if(live[i].zoneIdx >= 0)
+        {
+         if(IdxHas(idx, nOut, live[i].zoneIdx))
+            continue;
+         nOut++;
+         ArrayResize(idx, nOut);
+         idx[nOut - 1] = live[i].zoneIdx;
+         used++;
+         continue;
+        }
+      bool dup = false;
+      for(int j = 0; j < i; j++)
+        {
+         if(live[j].anchor > 0.0 && live[i].anchor > 0.0 &&
+            SameCl(live[j].anchor, live[i].anchor))
+           {
+            dup = true;
+            break;
+           }
+        }
+      if(!dup)
+         used++;
+     }
+
+   int    zIdx[];
+   double dist[];
+   double zCl[];
+   double zEntry[];
+   int    nCand = 0;
+   const int nz = ArraySize(g_zones);
+
+   for(int z = 0; z < nz; z++)
+     {
+      if(!ZoneOrderEligible(g_zones[z]))
+         continue;
+      if(wantBuy)
+        {
+         // Buy breakout: Atap (resisten) masih di atas harga
+         if(g_zones[z].isSupport || g_zones[z].high < bid)
+            continue;
+        }
+      else
+        {
+         // Sell breakout: Lantai (support) masih di bawah harga
+         if(!g_zones[z].isSupport || g_zones[z].low > bid)
+            continue;
+        }
+      double entry1 = 0.0;
+      double cl = 0.0;
+      double sl = 0.0;
+      const double extreme = wantBuy ? g_zones[z].high : g_zones[z].low;
+      CalcEntryClSl(wantBuy, extreme, u, entry1, cl, sl);
+      const double d = wantBuy ? (g_zones[z].high - bid) : (bid - g_zones[z].low);
+      nCand++;
+      ArrayResize(zIdx, nCand);
+      ArrayResize(dist, nCand);
+      ArrayResize(zCl, nCand);
+      ArrayResize(zEntry, nCand);
+      zIdx[nCand - 1]    = z;
+      dist[nCand - 1]    = d;
+      zCl[nCand - 1]     = cl;
+      zEntry[nCand - 1]  = entry1;
+     }
+
+   for(int i = 1; i < nCand; i++)
+     {
+      for(int j = i; j > 0; j--)
+        {
+         if(dist[j] >= dist[j - 1])
+            break;
+         const int    ti = zIdx[j];
+         const double td = dist[j];
+         const double tc = zCl[j];
+         const double te = zEntry[j];
+         zIdx[j]      = zIdx[j - 1];
+         dist[j]      = dist[j - 1];
+         zCl[j]       = zCl[j - 1];
+         zEntry[j]    = zEntry[j - 1];
+         zIdx[j - 1]  = ti;
+         dist[j - 1]  = td;
+         zCl[j - 1]   = tc;
+         zEntry[j - 1] = te;
+        }
+     }
+
+   const int cap = MaxGroupsPerSide();
+   for(int i = 0; i < nCand && used < cap; i++)
+     {
+      if(IdxHas(idx, nOut, zIdx[i]))
+         continue;
+      bool overlap = false;
+      for(int k = 0; k < nOut; k++)
+        {
+         const int pk = idx[k];
+         double pEntry = 0.0;
+         double pCl = 0.0;
+         double pSl = 0.0;
+         const double pExt = wantBuy ? g_zones[pk].high : g_zones[pk].low;
+         CalcEntryClSl(wantBuy, pExt, u, pEntry, pCl, pSl);
+         if(ClEntryOverlap(zCl[i], zEntry[i], pCl, pEntry))
+           {
+            overlap = true;
+            break;
+           }
+        }
+      if(!overlap)
+        {
+         for(int p = 0; p < nLive; p++)
+           {
+            if(ClEntryOverlap(zCl[i], zEntry[i], live[p].cl, live[p].entry))
+              {
+               overlap = true;
+               break;
+              }
+           }
+        }
+      if(overlap)
+         continue;
+      nOut++;
+      ArrayResize(idx, nOut);
+      idx[nOut - 1] = zIdx[i];
+      used++;
+     }
+  }
+
+//+------------------------------------------------------------------+
+int LayerCount()
+  {
+   int n = InpLayerCount;
+   if(n < 1)
+      n = 1;
+   if(n > 9)
+      n = 9;
+   return(n);
+  }
+
+//+------------------------------------------------------------------+
+double LayerLot(const int pos)
+  {
+   double lot = InpLot;
+   if(InpLotStepUp && LayerCount() > 1 && pos > 0)
+      lot = InpLot * (double)pos;
+   return(NormalizeLot(lot));
+  }
+
+//+------------------------------------------------------------------+
+//| U = jarak Anchor->Entry. Breakout: Buy di atas Atap (high+U),    |
+//| Sell di bawah Lantai (low-U). CL/SL di sisi sebaliknya zona.     |
+//+------------------------------------------------------------------+
+void CalcEntryClSl(const bool isBuy, const double extreme, const double u,
+                   double &entry1, double &cl, double &sl)
+  {
+   const double clBuf = UClDist(u);
+   const double slBuf = USlDist(u);
+   if(isBuy)
+     {
+      entry1 = extreme + u;
+      cl     = extreme - clBuf;
+      sl     = extreme - slBuf;
+     }
+   else
+     {
+      entry1 = extreme - u;
+      cl     = extreme + clBuf;
+      sl     = extreme + slBuf;
+     }
+   cl = NormalizePrice(cl);
+   sl = NormalizePrice(sl);
+  }
+
+//+------------------------------------------------------------------+
+void DrawPreviewSide(const bool isBuy, const double extreme, const double tp,
+                    const double u, const datetime tFrom, const bool drawTp)
+  {
+   if(extreme <= 0.0 || u <= 0.0)
+      return;
+   double entry1 = 0.0;
+   double cl     = 0.0;
+   double sl     = 0.0;
+   CalcEntryClSl(isBuy, extreme, u, entry1, cl, sl);
+   const color clr = clrSilver;
+   const string side = isBuy ? "B" : "S";
+   const string role = isBuy ? "Atap" : "Lantai";
+   const string pfx  = PREFIX_LV + "PV_" + side + "_";
+   CreateLevelSeg(pfx + "AN", extreme, tFrom, clr,
+                  StringFormat("PAC Preview %s\n%s", role, DoubleToString(extreme, _Digits)),
+                  "Preview " + role, STYLE_SOLID, 2);
+   CreateLevelSeg(pfx + "EN", NormalizePrice(entry1), tFrom, clr,
+                  StringFormat("PAC Preview Entry\n%s", DoubleToString(entry1, _Digits)),
+                  "Preview Entry", STYLE_DASH, 1);
+   CreateLevelSeg(pfx + "CL", cl, tFrom, clr,
+                  StringFormat("PAC Preview CL\n%s", DoubleToString(cl, _Digits)),
+                  "Preview CL", STYLE_DASHDOT, 1);
+   CreateLevelSeg(pfx + "SL", sl, tFrom, clr,
+                  StringFormat("PAC Preview SL\n%s", DoubleToString(sl, _Digits)),
+                  "Preview SL", STYLE_DOT, 1);
+   if(drawTp && tp > 0.0)
+      CreateLevelSeg(pfx + "TP", NormalizePrice(tp), tFrom, clr,
+                     StringFormat("PAC Preview TP\n%s", DoubleToString(tp, _Digits)),
+                     "Preview TP", STYLE_SOLID, 1);
+  }
+
+//+------------------------------------------------------------------+
+int FindVizIndex(const string code)
+  {
+   const int n = ArraySize(g_viz);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_viz[i].code == code)
+         return(i);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+double VizDistToBid(const VizGroup &v, const double bid)
+  {
+   const double px = (v.anchor > 0.0) ? v.anchor : ((v.entry > 0.0) ? v.entry : v.cl);
+   if(px <= 0.0 || bid <= 0.0)
+      return(DBL_MAX);
+   return(MathAbs(bid - px));
+  }
+
+//+------------------------------------------------------------------+
+void AssignVizRanks()
+  {
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   const int n = ArraySize(g_viz);
+   for(int pass = 0; pass < 2; pass++)
+     {
+      const bool wantBuy = (pass == 0);
+      int idx[];
+      int m = 0;
+      for(int i = 0; i < n; i++)
+        {
+         if(g_viz[i].isBuy != wantBuy)
+            continue;
+         ArrayResize(idx, m + 1);
+         idx[m++] = i;
+        }
+      for(int a = 1; a < m; a++)
+        {
+         const int hold = idx[a];
+         const double dHold = VizDistToBid(g_viz[hold], bid);
+         int b = a;
+         while(b > 0 && VizDistToBid(g_viz[idx[b - 1]], bid) > dHold)
+           {
+            idx[b] = idx[b - 1];
+            b--;
+           }
+         idx[b] = hold;
+        }
+      for(int a = 0; a < m; a++)
+         g_viz[idx[a]].rank = a + 1;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void FillVizGroups()
+  {
+   ArrayResize(g_viz, 0);
+   if(!ChartVisualsOn())
+      return;
+
+   LiveItem items[];
+   CollectItems(items);
+   const int nItems = ArraySize(items);
+   for(int i = 0; i < nItems; i++)
+     {
+      if(!items[i].parsed)
+         continue;
+      int vi = FindVizIndex(items[i].pac.groupCode);
+      if(vi < 0)
+        {
+         VizGroup v;
+         v.code    = items[i].pac.groupCode;
+         v.isBuy   = items[i].pac.isBuy;
+         v.rank    = 0;
+         v.anchor  = 0.0;
+         v.entry   = items[i].price;
+         v.cl      = items[i].pac.clPrice;
+         v.sl      = items[i].sl;
+         v.tp      = items[i].tp;
+         v.tFrom   = items[i].setupTime;
+         v.hasPos1 = (items[i].pac.position == 1);
+         v.anchor  = ResolveOrderAnchor(items[i].pac.isBuy, items[i].pac.clPrice,
+                                       items[i].sl, items[i].price,
+                                       items[i].pac.layerCount, items[i].pac.position);
+         const int n = ArraySize(g_viz);
+         ArrayResize(g_viz, n + 1);
+         g_viz[n] = v;
+        }
+      else
+        {
+         if(items[i].pac.position == 1)
+           {
+            g_viz[vi].entry   = items[i].price;
+            g_viz[vi].hasPos1 = true;
+           }
+         else if(!g_viz[vi].hasPos1 && g_viz[vi].entry <= 0.0)
+            g_viz[vi].entry = items[i].price;
+         if(items[i].sl > 0.0)
+            g_viz[vi].sl = items[i].sl;
+         if(items[i].tp > 0.0)
+            g_viz[vi].tp = items[i].tp;
+         if(items[i].pac.clPrice > 0.0)
+            g_viz[vi].cl = items[i].pac.clPrice;
+         if(g_viz[vi].anchor <= 0.0)
+            g_viz[vi].anchor = ResolveOrderAnchor(items[i].pac.isBuy, items[i].pac.clPrice,
+                                                  items[i].sl, items[i].price,
+                                                  items[i].pac.layerCount, items[i].pac.position);
+         if(items[i].setupTime > 0 &&
+            (g_viz[vi].tFrom <= 0 || items[i].setupTime < g_viz[vi].tFrom))
+            g_viz[vi].tFrom = items[i].setupTime;
+        }
+     }
+
+   const int nv = ArraySize(g_viz);
+   for(int i = 0; i < nv; i++)
+     {
+      if(g_viz[i].anchor <= 0.0)
+        {
+         const int gi = FindGroupIndex(g_viz[i].code);
+         if(gi >= 0)
+            g_viz[i].anchor = g_groups[gi].anchor;
+        }
+      if(g_viz[i].anchor <= 0.0)
+         g_viz[i].anchor = ResolveOrderAnchor(g_viz[i].isBuy, g_viz[i].cl,
+                                              g_viz[i].sl, g_viz[i].entry, 1, 1);
+      const int z = FindZoneIndexForAnchor(g_viz[i].isBuy, g_viz[i].anchor);
+      if(z >= 0)
+        {
+         g_viz[i].anchor = ZoneExtreme(g_viz[i].isBuy, z);
+         g_viz[i].tFrom  = g_zones[z].left;
+        }
+      if(!g_viz[i].hasPos1 && g_viz[i].anchor > 0.0 && g_viz[i].cl > 0.0)
+        {
+         const double k = MathMax(InpCLPercentArea, 0) / 100.0;
+         if(k > 0.0)
+           {
+            const double u = g_viz[i].isBuy ? ((g_viz[i].anchor - g_viz[i].cl) / k)
+                                            : ((g_viz[i].cl - g_viz[i].anchor) / k);
+            if(u > 0.0)
+              {
+               double e1 = 0.0, clx = 0.0, slx = 0.0;
+               CalcEntryClSl(g_viz[i].isBuy, g_viz[i].anchor, u, e1, clx, slx);
+               g_viz[i].entry = NormalizePrice(e1);
+               if(g_viz[i].sl <= 0.0)
+                  g_viz[i].sl = slx;
+              }
+           }
+        }
+     }
+   AssignVizRanks();
+  }
+
+//+------------------------------------------------------------------+
+void DrawArmedVisuals()
+  {
+   if(!ChartVisualsOn())
+      return;
+   ObjectsDeleteAll(0, PREFIX_ATAP);
+   ObjectsDeleteAll(0, PREFIX_LANTAI);
+   ObjectsDeleteAll(0, PREFIX_LV);
+
+   bool hasBuy  = false;
+   bool hasSell = false;
+   const int n = ArraySize(g_viz);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_viz[i].rank <= 0)
+         continue;
+      if(g_viz[i].isBuy)
+         hasBuy = true;
+      else
+         hasSell = true;
+      const color clr = GroupColor(g_viz[i].isBuy, g_viz[i].rank);
+      const string tag = (g_viz[i].isBuy ? "B" : "S") + IntegerToString(g_viz[i].rank);
+      const string pfx = PREFIX_LV + tag + "_";
+      const datetime tFrom = g_viz[i].tFrom;
+      const string role = g_viz[i].isBuy ? "Atap" : "Lantai";
+      CreateLevelSeg(pfx + "AN", g_viz[i].anchor, tFrom, clr,
+                     StringFormat("PAC %s %s\n%s", tag, role, DoubleToString(g_viz[i].anchor, _Digits)),
+                     tag + " " + role, STYLE_SOLID, 2);
+      CreateLevelSeg(pfx + "EN", g_viz[i].entry, tFrom, clr,
+                     StringFormat("PAC %s Entry\n%s", tag, DoubleToString(g_viz[i].entry, _Digits)),
+                     tag + " Entry", STYLE_DASH, 1);
+      CreateLevelSeg(pfx + "CL", g_viz[i].cl, tFrom, clr,
+                     StringFormat("PAC %s CL\n%s", tag, DoubleToString(g_viz[i].cl, _Digits)),
+                     tag + " CL", STYLE_DASHDOT, 1);
+      const bool tpAd = TpIsAdaptiveNow(g_viz[i].isBuy, g_viz[i].entry, g_viz[i].tp);
+      const string tpLabel = tpAd ? (tag + " TP adaptif") : (tag + " TP");
+      CreateLevelSeg(pfx + "TP", g_viz[i].tp, tFrom, clr,
+                     StringFormat("PAC %s TP\n%s", tag, DoubleToString(g_viz[i].tp, _Digits)),
+                     tpLabel, STYLE_SOLID, 1);
+      CreateLevelSeg(pfx + "SL", g_viz[i].sl, tFrom, clr,
+                     StringFormat("PAC %s SL\n%s", tag, DoubleToString(g_viz[i].sl, _Digits)),
+                     tag + " SL", STYLE_DOT, 1);
+     }
+
+   const double u = (g_vizU > 0.0) ? g_vizU : ComputeU();
+   if(!hasBuy && g_vizAtapIdx >= 0)
+     {
+      const SrZone z = g_zones[g_vizAtapIdx];
+      DrawPreviewSide(true, z.high, MandiriTp(true, z.high, u), u, z.left, true);
+     }
+   if(!hasSell && g_vizLantaiIdx >= 0)
+     {
+      const SrZone z = g_zones[g_vizLantaiIdx];
+      DrawPreviewSide(false, z.low, MandiriTp(false, z.low, u), u, z.left, true);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void RefreshChartVisuals()
+  {
+   if(!ChartVisualsOn())
+      return;
+   FillVizGroups();
+   DrawSrZones();
+   DrawArmedVisuals();
+  }
+
+//+------------------------------------------------------------------+
+void PaintChart()
+  {
+   if(!ChartVisualsOn())
+      return;
+   RefreshChartVisuals();
+   DrawNewsMarks();
+   DrawHourMarks();
+   DrawPivots();
+   ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+void PaintArmedVisuals()
+  {
+   if(!ChartVisualsOn())
+      return;
+   RefreshChartVisuals();
+   DrawPivots();
+   ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+void DrawAtapLantai()
+  {
+   g_vizAtapIdx   = -1;
+   g_vizLantaiIdx = -1;
+   g_vizPaired    = false;
+   g_vizU         = ComputeU();
+
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0.0)
+      return;
+
+   int atapIdx = -1;
+   int lantaiIdx = -1;
+   double bestAtap = DBL_MAX;
+   double bestLantai = DBL_MAX;
+
+   const int n = ArraySize(g_zones);
+   for(int i = 0; i < n; i++)
+     {
+      if(!ZoneOrderEligible(g_zones[i]))
+         continue;
+      if(g_zones[i].isSupport)
+        {
+         if(g_zones[i].low > bid)
+            continue;
+         const double dist = bid - g_zones[i].low;
+         if(dist < bestLantai)
+           {
+            bestLantai = dist;
+            lantaiIdx = i;
+           }
+        }
+      else
+        {
+         if(g_zones[i].high < bid)
+            continue;
+         const double dist = g_zones[i].high - bid;
+         if(dist < bestAtap)
+           {
+            bestAtap = dist;
+            atapIdx = i;
+           }
+        }
+     }
+
+   const bool hasAtap   = (atapIdx >= 0);
+   const bool hasLantai = (lantaiIdx >= 0);
+   const double atap   = hasAtap   ? g_zones[atapIdx].high : 0.0;
+   const double lantai = hasLantai ? g_zones[lantaiIdx].low : 0.0;
+   const double u      = g_vizU;
+   const bool paired   = (hasAtap && hasLantai && AutoPairZones(atap, lantai, u));
+
+   g_vizAtapIdx   = atapIdx;
+   g_vizLantaiIdx = lantaiIdx;
+   g_vizPaired    = paired;
+   MaybeSendEligible(atapIdx, lantaiIdx, paired, u);
+  }
+
+//+------------------------------------------------------------------+
+double NormalizePrice(const double price)
+  {
+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   if(tick <= 0.0)
+      tick = _Point;
+   return(NormalizeDouble(MathRound(price / tick) * tick, _Digits));
+  }
+
+//+------------------------------------------------------------------+
+double NormalizeLot(const double lot)
+  {
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minl = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxl = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0.0)
+      step = 0.01;
+   if(minl <= 0.0)
+      minl = step;
+   double v = MathFloor(lot / step + 1e-8) * step;
+   if(v < minl)
+      v = minl;
+   if(maxl > 0.0 && v > maxl)
+      v = maxl;
+   const int digits = (step >= 1.0) ? 0 : (int)MathRound(-MathLog10(step));
+   return(NormalizeDouble(v, MathMax(digits, 0)));
+  }
+
+//+------------------------------------------------------------------+
+string TfTag()
+  {
+   string s = EnumToString(DetectionTF());
+   const int p = StringFind(s, "_");
+   if(p >= 0)
+      return(StringSubstr(s, p + 1));
+   return(s);
+  }
+
+//+------------------------------------------------------------------+
+string StampNow(const datetime t)
+  {
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   return(StringFormat("%02d%02d%02d.%02d%02d%02d",
+                       dt.year % 100, dt.mon, dt.day,
+                       dt.hour, dt.min, dt.sec));
+  }
+
+//+------------------------------------------------------------------+
+string MakeComment(const bool paired, const bool isBuy, const int layers, const int pos,
+                   const double cl, const string ts)
+  {
+   const string head = StringFormat("%s%s%d%d/%s/",
+                                    paired ? "P" : "M",
+                                    isBuy ? "B" : "S",
+                                    layers, pos,
+                                    TfTag());
+   const string tail = "/" + ts;
+   int budget = 30 - StringLen(head) - StringLen(tail);
+   if(budget < 1)
+      budget = 1;
+   int d = _Digits;
+   string clt = DoubleToString(NormalizePrice(cl), d);
+   while(StringLen(clt) > budget && d > 0)
+     {
+      d--;
+      clt = DoubleToString(NormalizePrice(cl), d);
+     }
+   if(StringLen(clt) > budget)
+      clt = StringSubstr(clt, 0, budget);
+   return(head + clt + tail);
+  }
+
+//+------------------------------------------------------------------+
+bool ParsePacCommentEx(const string cmt, PacCmt &out)
+  {
+   out.groupCode  = "";
+   out.isBuy      = false;
+   out.paired     = false;
+   out.layerCount = 0;
+   out.position   = 0;
+   out.timeframe  = PERIOD_CURRENT;
+   out.clPrice    = 0.0;
+   out.tfText     = "";
+   out.stamp      = "";
+
+   string parts[];
+   const int n = StringSplit(cmt, '/', parts);
+   if(n < 4)
+      return(false);
+   if(StringLen(parts[0]) != 4)
+      return(false);
+   const ushort c0 = StringGetCharacter(parts[0], 0);
+   const ushort c1 = StringGetCharacter(parts[0], 1);
+   if((c0 != 'P' && c0 != 'M') || (c1 != 'B' && c1 != 'S'))
+      return(false);
+   const int d2 = (int)(StringGetCharacter(parts[0], 2) - '0');
+   const int d3 = (int)(StringGetCharacter(parts[0], 3) - '0');
+   if(d2 < 1 || d2 > 9 || d3 < 1 || d3 > 9 || d3 > d2)
+      return(false);
+   ENUM_TIMEFRAMES tf = PERIOD_CURRENT;
+   if(!TimeframeFromString(parts[1], tf))
+      return(false);
+   const double cl = StringToDouble(parts[2]);
+   if(cl <= 0.0 || StringLen(parts[3]) < 8)
+      return(false);
+
+   out.paired     = (c0 == 'P');
+   out.isBuy      = (c1 == 'B');
+   out.layerCount = d2;
+   out.position   = d3;
+   out.timeframe  = tf;
+   out.clPrice    = cl;
+   out.tfText     = parts[1];
+   out.stamp      = parts[3];
+   // groupCode sengaja cuma pakai arah (B/S) + stamp, TANPA status paired (P/M) --
+   // reentry menghitung ulang paired/mandiri fresh (bisa beda dari kirim awal),
+   // jadi identitas grup tidak boleh ikut goyah kalau status itu berubah.
+   out.groupCode  = StringSubstr(parts[0], 1, 1) + "-" + parts[3];
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+bool ParsePacComment(const string cmt, bool &isBuy, int &pos, double &cl, string &ts)
+  {
+   PacCmt p;
+   if(!ParsePacCommentEx(cmt, p))
+      return(false);
+   isBuy = p.isBuy;
+   pos   = p.position;
+   cl    = p.clPrice;
+   ts    = p.stamp;
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+bool SameCl(const double a, const double b)
+  {
+   return(MathAbs(NormalizePrice(a) - NormalizePrice(b)) <= MathMax(PipSize() * 0.25, _Point));
+  }
+
+//+------------------------------------------------------------------+
+double AnchorFromClSl(const bool isBuy, const double cl, const double sl)
+  {
+   const double k = MathMax(InpCLPercentArea, 0) / 100.0;
+   const double s = MathMax(InpSLPercentArea, 0) / 100.0;
+   if(cl <= 0.0 || sl <= 0.0 || s <= k)
+      return(0.0);
+   if(isBuy)
+     {
+      if(cl <= sl)
+         return(0.0);
+      const double u = (cl - sl) / (s - k);
+      if(u <= 0.0)
+         return(0.0);
+      return(NormalizePrice(cl + k * u));
+     }
+   if(sl <= cl)
+      return(0.0);
+   const double u = (sl - cl) / (s - k);
+   if(u <= 0.0)
+      return(0.0);
+   return(NormalizePrice(cl - k * u));
+  }
+
+//+------------------------------------------------------------------+
+double AnchorFromClEntry(const bool isBuy, const double cl, const double entry,
+                         const int layers, const int pos)
+  {
+   const double k = MathMax(InpCLPercentArea, 0) / 100.0;
+   if(cl <= 0.0 || entry <= 0.0 || layers < 1 || pos < 1)
+      return(0.0);
+   const double frac = (double)(layers - pos + 1) / (double)layers;
+   const double den = frac + k;
+   if(den <= 0.0)
+      return(0.0);
+   if(isBuy)
+     {
+      if(entry <= cl)
+         return(0.0);
+      const double u = (entry - cl) / den;
+      if(u <= 0.0)
+         return(0.0);
+      return(NormalizePrice(cl + k * u));
+     }
+   if(cl <= entry)
+      return(0.0);
+   const double u = (cl - entry) / den;
+   if(u <= 0.0)
+      return(0.0);
+   return(NormalizePrice(cl - k * u));
+  }
+
+//+------------------------------------------------------------------+
+double ResolveOrderAnchor(const bool isBuy, const double cl, const double sl,
+                           const double entry, const int layers, const int pos)
+  {
+   const double fromSl = AnchorFromClSl(isBuy, cl, sl);
+   if(fromSl > 0.0)
+      return(fromSl);
+   return(AnchorFromClEntry(isBuy, cl, entry, layers, pos));
+  }
+
+//+------------------------------------------------------------------+
+int FindZoneIndexForAnchor(const bool isBuy, const double anchor)
+  {
+   if(anchor <= 0.0)
+      return(-1);
+   int best = -1;
+   double bestD = DBL_MAX;
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport == isBuy)
+         continue;
+      const double ext = isBuy ? g_zones[z].high : g_zones[z].low;
+      const double d = MathAbs(ext - anchor);
+      if(d < bestD)
+        {
+         bestD = d;
+         best = z;
+        }
+     }
+   if(best < 0)
+      return(-1);
+   const double ext = isBuy ? g_zones[best].high : g_zones[best].low;
+   if(!SameCl(ext, anchor))
+      return(-1);
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+int FindZoneIndexForFrozenCl(const bool isBuy, const double cl)
+  {
+   int best = -1;
+   double bestD = DBL_MAX;
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport == isBuy)
+         continue;
+      double d = 0.0;
+      if(isBuy)
+        {
+         if(g_zones[z].high <= cl)
+            continue;
+         d = g_zones[z].high - cl;
+        }
+      else
+        {
+         if(g_zones[z].low >= cl)
+            continue;
+         d = cl - g_zones[z].low;
+        }
+      if(d < bestD)
+        {
+         bestD = d;
+         best = z;
+        }
+     }
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+double ZoneExtreme(const bool isBuy, const int z)
+  {
+   if(z < 0 || z >= ArraySize(g_zones))
+      return(0.0);
+   return(isBuy ? g_zones[z].high : g_zones[z].low);
+  }
+
+//+------------------------------------------------------------------+
+double SlotAnchor(const TpSlot &slot)
+  {
+   if(slot.anchor > 0.0)
+      return(slot.anchor);
+   const int z = FindZoneIndexForFrozenCl(slot.isBuy, slot.clPrice);
+   return(ZoneExtreme(slot.isBuy, z));
+  }
+
+//+------------------------------------------------------------------+
+int ZoneIndexFromOrderLevels(const bool isBuy, const double cl, const double sl,
+                             const double entry, const int layers, const int pos)
+  {
+   const double a = ResolveOrderAnchor(isBuy, cl, sl, entry, layers, pos);
+   const int z = FindZoneIndexForAnchor(isBuy, a);
+   if(z >= 0)
+      return(z);
+   return(FindZoneIndexForFrozenCl(isBuy, cl));
+  }
+
+//+------------------------------------------------------------------+
+bool LiveSlotsHaveAnchor(const bool isBuy, const double anchor,
+                         const int &buyIdx[], const int nBuy,
+                         const int &sellIdx[], const int nSell)
+  {
+   if(anchor <= 0.0)
+      return(false);
+   if(isBuy)
+     {
+      for(int i = 0; i < nBuy; i++)
+        {
+         if(SameCl(g_zones[buyIdx[i]].high, anchor))
+            return(true);
+        }
+     }
+   else
+     {
+      for(int i = 0; i < nSell; i++)
+        {
+         if(SameCl(g_zones[sellIdx[i]].low, anchor))
+            return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool PacScan(const bool wantBuy, const double anchor, const int wantPos,
+             const bool positions, const bool pendings, string &tsOut)
+  {
+   tsOut = "";
+   if(anchor <= 0.0)
+      return(false);
+   if(positions)
+     {
+      const int np = PositionsTotal();
+      for(int i = 0; i < np; i++)
+        {
+         const ulong ticket = PositionGetTicket(i);
+         if(ticket == 0 || !PositionSelectByTicket(ticket))
+            continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+            continue;
+         if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+            continue;
+         PacCmt p;
+         if(!ParsePacCommentEx(PositionGetString(POSITION_COMMENT), p))
+            continue;
+         if(p.isBuy != wantBuy)
+            continue;
+         if(wantPos > 0 && p.position != wantPos)
+            continue;
+         const int z = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                               PositionGetDouble(POSITION_SL),
+                                               PositionGetDouble(POSITION_PRICE_OPEN),
+                                               p.layerCount, p.position);
+         if(z < 0 || !SameCl(ZoneExtreme(wantBuy, z), anchor))
+            continue;
+         tsOut = p.stamp;
+         return(true);
+        }
+     }
+   if(pendings)
+     {
+      const int no = OrdersTotal();
+      for(int i = 0; i < no; i++)
+        {
+         const ulong ticket = OrderGetTicket(i);
+         if(ticket == 0 || !OrderSelect(ticket))
+            continue;
+         if(OrderGetString(ORDER_SYMBOL) != _Symbol)
+            continue;
+         if(OrderGetInteger(ORDER_MAGIC) != InpMagic)
+            continue;
+         PacCmt p;
+         if(!ParsePacCommentEx(OrderGetString(ORDER_COMMENT), p))
+            continue;
+         if(p.isBuy != wantBuy)
+            continue;
+         if(wantPos > 0 && p.position != wantPos)
+            continue;
+         const int z = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                               OrderGetDouble(ORDER_SL),
+                                               OrderGetDouble(ORDER_PRICE_OPEN),
+                                               p.layerCount, p.position);
+         if(z < 0 || !SameCl(ZoneExtreme(wantBuy, z), anchor))
+            continue;
+         tsOut = p.stamp;
+         return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool HasPacSide(const bool isBuy, const double anchor, string &tsOut)
+  {
+   return(PacScan(isBuy, anchor, 0, true, true, tsOut));
+  }
+
+//+------------------------------------------------------------------+
+bool HasPacLayer(const bool isBuy, const double anchor, const int pos)
+  {
+   string ts = "";
+   return(PacScan(isBuy, anchor, pos, true, true, ts));
+  }
+
+//+------------------------------------------------------------------+
+bool HasPacPosition(const bool isBuy, const double anchor)
+  {
+   string ts = "";
+   return(PacScan(isBuy, anchor, 0, true, false, ts));
+  }
+
+//+------------------------------------------------------------------+
+bool HasQueuedReentry(const bool isBuy, const double anchor)
+  {
+   const int n = ArraySize(g_tpBatches);
+   for(int i = 0; i < n; i++)
+     {
+      for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
+        {
+         if(g_tpBatches[i].slots[s].isBuy != isBuy)
+            continue;
+         if(SameCl(SlotAnchor(g_tpBatches[i].slots[s]), anchor))
+            return(true);
+        }
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void CancelStalePendings(const int &buyIdx[], const int nBuy,
+                         const int &sellIdx[], const int nSell)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !OrderSelect(ticket))
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol)
+         continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+      PacCmt p;
+      if(!ParsePacCommentEx(OrderGetString(ORDER_COMMENT), p))
+         continue;
+      const int z = ZoneIndexFromOrderLevels(p.isBuy, p.clPrice,
+                                            OrderGetDouble(ORDER_SL),
+                                            OrderGetDouble(ORDER_PRICE_OPEN),
+                                            p.layerCount, p.position);
+      const double anchor = (z >= 0) ? ZoneExtreme(p.isBuy, z)
+                                       : ResolveOrderAnchor(p.isBuy, p.clPrice,
+                                                             OrderGetDouble(ORDER_SL),
+                                                             OrderGetDouble(ORDER_PRICE_OPEN),
+                                                             p.layerCount, p.position);
+      if(LiveSlotsHaveAnchor(p.isBuy, anchor, buyIdx, nBuy, sellIdx, nSell))
+         continue;
+      const string cmt = OrderGetString(ORDER_COMMENT);
+      if(g_trade.OrderDelete(ticket) && TradeOk())
+        {
+         if(ChartVisualsOn()) Print("PAC geser: hapus pending grup jauh ", cmt);
+         DropTpBatchesForGroup(p.groupCode);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DropStaleTpBatches(const int &buyIdx[], const int nBuy,
+                        const int &sellIdx[], const int nSell)
+  {
+   for(int i = ArraySize(g_tpBatches) - 1; i >= 0; i--)
+     {
+      const int gi = FindGroupIndex(g_tpBatches[i].groupCode);
+      bool live = false;
+      if(gi >= 0)
+        {
+         const bool buy = (g_groups[gi].direction > 0);
+         double anchor = g_groups[gi].anchor;
+         if(anchor <= 0.0 && ArraySize(g_tpBatches[i].slots) > 0)
+            anchor = SlotAnchor(g_tpBatches[i].slots[0]);
+         if(anchor <= 0.0)
+           {
+            const int z = FindZoneIndexForFrozenCl(buy, g_groups[gi].clPrice);
+            anchor = ZoneExtreme(buy, z);
+           }
+         live = LiveSlotsHaveAnchor(buy, anchor, buyIdx, nBuy, sellIdx, nSell);
+        }
+      if(!live)
+         RemoveTpBatchAt(i);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void BuildLiveSlots(double &liveCl[], bool &liveBuy[], int &nLive,
+                    int &buyIdx[], int &nBuy, int &sellIdx[], int &nSell)
+  {
+   nLive = 0;
+   ArrayResize(liveCl, 0);
+   ArrayResize(liveBuy, 0);
+   nBuy = 0;
+   nSell = 0;
+   ArrayResize(buyIdx, 0);
+   ArrayResize(sellIdx, 0);
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(bid <= 0.0)
+      return;
+   const double u   = ComputeU();
+   const double buf = UClDist(u);
+   CollectNearestZones(true, bid, u, buyIdx, nBuy);
+   CollectNearestZones(false, bid, u, sellIdx, nSell);
+   for(int i = 0; i < nBuy; i++)
+     {
+      const double cl = NormalizePrice(g_zones[buyIdx[i]].high - buf);
+      nLive++;
+      ArrayResize(liveCl, nLive);
+      ArrayResize(liveBuy, nLive);
+      liveCl[nLive - 1]  = cl;
+      liveBuy[nLive - 1] = true;
+     }
+   for(int i = 0; i < nSell; i++)
+     {
+      const double cl = NormalizePrice(g_zones[sellIdx[i]].low + buf);
+      nLive++;
+      ArrayResize(liveCl, nLive);
+      ArrayResize(liveBuy, nLive);
+      liveCl[nLive - 1]  = cl;
+      liveBuy[nLive - 1] = false;
+     }
+  }
+
+//+------------------------------------------------------------------+
+ENUM_ORDER_TYPE SelectPendingType(const bool isBuy, const double entry)
+  {
+   const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(isBuy)
+      return((entry < ask) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_BUY_STOP);
+   return((entry > bid) ? ORDER_TYPE_SELL_LIMIT : ORDER_TYPE_SELL_STOP);
+  }
+
+//+------------------------------------------------------------------+
+bool TradeOk()
+  {
+   const uint r = g_trade.ResultRetcode();
+   return(r == TRADE_RETCODE_DONE ||
+          r == TRADE_RETCODE_DONE_PARTIAL ||
+          r == TRADE_RETCODE_PLACED ||
+          r == TRADE_RETCODE_NO_CHANGES);
+  }
+
+//+------------------------------------------------------------------+
+bool PlacePending(const bool isBuy, const double lot, const double price,
+                  const double sl, const double tp, const string comment)
+  {
+   string newsName = "";
+   if(InNewsWindow(newsName))
+      return(false);
+   string hourLabel = "";
+   if(InHourFilterWindow(hourLabel))
+      return(false);
+   if(IsDisabledDayWib())
+      return(false);
+   const ENUM_ORDER_TYPE type = SelectPendingType(isBuy, price);
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetTypeFillingBySymbol(_Symbol);
+   bool ok = false;
+   if(type == ORDER_TYPE_BUY_LIMIT)
+      ok = g_trade.BuyLimit(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+   else if(type == ORDER_TYPE_BUY_STOP)
+      ok = g_trade.BuyStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+   else if(type == ORDER_TYPE_SELL_LIMIT)
+      ok = g_trade.SellLimit(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+   else if(type == ORDER_TYPE_SELL_STOP)
+      ok = g_trade.SellStop(lot, price, _Symbol, sl, tp, ORDER_TIME_GTC, 0, comment);
+   if(ok && TradeOk())
+      return(true);
+   if(ChartVisualsOn()) Print("PAC order gagal: ", comment, " ret=", g_trade.ResultRetcode(),
+         " ", g_trade.ResultRetcodeDescription());
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void SendSide(const bool isBuy, const bool paired, const double extreme, const double tp,
+              const double u, const string ts)
+  {
+   const int n = LayerCount();
+   double cl = 0.0;
+   double sl = 0.0;
+   double entry1 = 0.0;
+   CalcEntryClSl(isBuy, extreme, u, entry1, cl, sl);
+   const double tpN = NormalizePrice(tp);
+   string dummy = "";
+   if(HasPacSide(isBuy, extreme, dummy) || HasQueuedReentry(isBuy, extreme))
+      return;
+
+   for(int i = 1; i <= n; i++)
+     {
+      if(HasPacLayer(isBuy, extreme, i))
+         continue;
+      double entry = entry1 + (extreme - entry1) * (double)(i - 1) / (double)n;
+      entry = NormalizePrice(entry);
+      if((isBuy && tpN <= entry) || (!isBuy && tpN >= entry))
+         continue;
+      const string cmt = MakeComment(paired, isBuy, n, i, cl, ts);
+      const double lot = LayerLot(i);
+      if(PlacePending(isBuy, lot, entry, sl, tpN, cmt))
+         if(ChartVisualsOn()) Print("PAC pending: ", cmt, " @ ", DoubleToString(entry, _Digits),
+               " lot ", DoubleToString(lot, 2));
+     }
+  }
+
+//+------------------------------------------------------------------+
+double NearestOppositeExtreme(const bool isBuy, const double extreme, const double u,
+                              const double &liveCl[], const bool &liveBuy[], const int nLive)
+  {
+   const double buf = UClDist(u);
+   double best = 0.0;
+   double bestDist = DBL_MAX;
+   for(int i = 0; i < nLive; i++)
+     {
+      if(liveBuy[i] == isBuy)
+         continue;
+      const double oppExtreme = liveBuy[i] ? (liveCl[i] + buf) : (liveCl[i] - buf);
+      double dist = 0.0;
+      if(isBuy)
+        {
+         if(oppExtreme <= extreme)
+            continue;
+         dist = oppExtreme - extreme;
+        }
+      else
+        {
+         if(oppExtreme >= extreme)
+            continue;
+         dist = extreme - oppExtreme;
+        }
+      if(dist < bestDist)
+        {
+         bestDist = dist;
+         best = oppExtreme;
+        }
+     }
+   return(best);
+  }
+
+//+------------------------------------------------------------------+
+double IndependentTp(const bool isBuy, const double extreme, const double u,
+                     const double &liveCl[], const bool &liveBuy[], const int nLive)
+  {
+   if(nLive < 0 || ArraySize(liveCl) < 0 || ArraySize(liveBuy) < 0)
+      return(0.0);
+   return(MandiriTp(isBuy, extreme, u));
+  }
+
+//+------------------------------------------------------------------+
+void MaybeSendEligible(const int atapIdx, const int lantaiIdx, const bool paired,
+                       const double u)
+  {
+   if(paired && atapIdx >= 0 && lantaiIdx >= 0)
+     {
+      // Breakout: abaikan TP pasangan; tiap sisi mandiri.
+     }
+   if(!InpSendOrders || InpLot <= 0.0)
+      return;
+   string newsName = "";
+   if(InNewsWindow(newsName))
+      return;
+   string hourLabel = "";
+   if(InHourFilterWindow(hourLabel))
+      return;
+   if(IsDisabledDayWib())
+      return;
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED))
+      return;
+
+   int buyIdx[];
+   int sellIdx[];
+   int nBuy  = 0;
+   int nSell = 0;
+   double liveCl[];
+   bool   liveBuy[];
+   int    nLive = 0;
+   BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
+   CancelStalePendings(buyIdx, nBuy, sellIdx, nSell);
+   DropStaleTpBatches(buyIdx, nBuy, sellIdx, nSell);
+
+   datetime stamp = TimeCurrent();
+
+   for(int i = 0; i < nBuy; i++)
+     {
+      const int z = buyIdx[i];
+      string ts = "";
+      if(!HasPacSide(true, g_zones[z].high, ts) || StringLen(ts) == 0)
+        {
+         ts = StampNow(stamp);
+         stamp++;
+        }
+      const double tp = IndependentTp(true, g_zones[z].high, u, liveCl, liveBuy, nLive);
+      SendSide(true, false, g_zones[z].high, tp, u, ts);
+     }
+   for(int i = 0; i < nSell; i++)
+     {
+      const int z = sellIdx[i];
+      string ts = "";
+      if(!HasPacSide(false, g_zones[z].low, ts) || StringLen(ts) == 0)
+        {
+         ts = StampNow(stamp);
+         stamp++;
+        }
+      const double tp = IndependentTp(false, g_zones[z].low, u, liveCl, liveBuy, nLive);
+      SendSide(false, false, g_zones[z].low, tp, u, ts);
+     }
+  }
+
+//+------------------------------------------------------------------+
+bool TimeframeFromString(const string s, ENUM_TIMEFRAMES &tf)
+  {
+   if(s == "M1")  { tf = PERIOD_M1;  return(true); }
+   if(s == "M2")  { tf = PERIOD_M2;  return(true); }
+   if(s == "M3")  { tf = PERIOD_M3;  return(true); }
+   if(s == "M4")  { tf = PERIOD_M4;  return(true); }
+   if(s == "M5")  { tf = PERIOD_M5;  return(true); }
+   if(s == "M6")  { tf = PERIOD_M6;  return(true); }
+   if(s == "M10") { tf = PERIOD_M10; return(true); }
+   if(s == "M12") { tf = PERIOD_M12; return(true); }
+   if(s == "M15") { tf = PERIOD_M15; return(true); }
+   if(s == "M20") { tf = PERIOD_M20; return(true); }
+   if(s == "M30") { tf = PERIOD_M30; return(true); }
+   if(s == "H1")  { tf = PERIOD_H1;  return(true); }
+   if(s == "H2")  { tf = PERIOD_H2;  return(true); }
+   if(s == "H3")  { tf = PERIOD_H3;  return(true); }
+   if(s == "H4")  { tf = PERIOD_H4;  return(true); }
+   if(s == "H6")  { tf = PERIOD_H6;  return(true); }
+   if(s == "H8")  { tf = PERIOD_H8;  return(true); }
+   if(s == "H12") { tf = PERIOD_H12; return(true); }
+   if(s == "D1")  { tf = PERIOD_D1;  return(true); }
+   if(s == "W1")  { tf = PERIOD_W1;  return(true); }
+   if(s == "MN1") { tf = PERIOD_MN1; return(true); }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+bool IsBuyOrderType(const ENUM_ORDER_TYPE t)
+  {
+   return(t == ORDER_TYPE_BUY || t == ORDER_TYPE_BUY_LIMIT ||
+          t == ORDER_TYPE_BUY_STOP || t == ORDER_TYPE_BUY_STOP_LIMIT);
+  }
+
+//+------------------------------------------------------------------+
+bool ClBrokenOnClosedBar(const bool isBuy, const double cl, const ENUM_TIMEFRAMES tf)
+  {
+   const double c = iClose(_Symbol, tf, 1);
+   if(c <= 0.0)
+      return(false);
+   if(isBuy)
+      return(c < cl);
+   return(c > cl);
+  }
+
+//+------------------------------------------------------------------+
+bool DealProcessed(const ulong deal)
+  {
+   const int n = ArraySize(g_processedDeals);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_processedDeals[i] == deal)
+         return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void MarkDealProcessed(const ulong deal)
+  {
+   const int n = ArraySize(g_processedDeals);
+   ArrayResize(g_processedDeals, n + 1, 64);
+   g_processedDeals[n] = deal;
+   if(n > 400)
+     {
+      for(int i = 0; i < n - 200; i++)
+         g_processedDeals[i] = g_processedDeals[i + 200];
+      ArrayResize(g_processedDeals, n - 200);
+     }
+  }
+
+//+------------------------------------------------------------------+
+int FindGroupIndex(const string code)
+  {
+   const int n = ArraySize(g_groups);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_groups[i].groupCode == code)
+         return(i);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+int FindZoneIndexForCl(const bool isBuy, const double cl)
+  {
+   const double u = ComputeU();
+   const int nz = ArraySize(g_zones);
+   for(int z = 0; z < nz; z++)
+     {
+      if(g_zones[z].isSupport == isBuy)
+         continue;
+      double zcl = 0.0;
+      double ztp = 0.0;
+      ZoneClTp(g_zones[z], u, zcl, ztp);
+      if(SameCl(zcl, cl))
+         return(z);
+     }
+   return(FindZoneIndexForFrozenCl(isBuy, cl));
+  }
+
+//+------------------------------------------------------------------+
+bool GroupPivotCapReached(const PacGroup &g)
+  {
+   const bool isBuy = (g.direction > 0);
+   int z = (g.anchor > 0.0) ? FindZoneIndexForAnchor(isBuy, g.anchor) : -1;
+   if(z < 0)
+      z = FindZoneIndexForCl(isBuy, g.clPrice);
+   if(z < 0)
+      return(false);
+   return(g_zones[z].pivotTouches >= MaxPivotTouches());
+  }
+
+//+------------------------------------------------------------------+
+int FindBatchIndex(const string code)
+  {
+   const int n = ArraySize(g_tpBatches);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_tpBatches[i].groupCode == code)
+         return(i);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+int FindSnapIndex(const ulong positionId)
+  {
+   const int n = ArraySize(g_snaps);
+   for(int i = 0; i < n; i++)
+     {
+      if(g_snaps[i].positionId == positionId)
+         return(i);
+     }
+   return(-1);
+  }
+
+//+------------------------------------------------------------------+
+void UpsertPositionSnapshot(const ulong posTicket)
+  {
+   if(posTicket == 0 || !PositionSelectByTicket(posTicket))
+      return;
+   if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+      return;
+   if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+      return;
+
+   Snapshot s;
+   s.positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   s.ticket     = posTicket;
+   s.comment    = PositionGetString(POSITION_COMMENT);
+   s.entry      = PositionGetDouble(POSITION_PRICE_OPEN);
+   s.sl         = PositionGetDouble(POSITION_SL);
+   s.tp         = PositionGetDouble(POSITION_TP);
+   s.lot        = PositionGetDouble(POSITION_VOLUME);
+   s.isBuy      = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+
+   const int idx = FindSnapIndex(s.positionId);
+   if(idx >= 0)
+     {
+      g_snaps[idx] = s;
+      return;
+     }
+   const int n = ArraySize(g_snaps);
+   ArrayResize(g_snaps, n + 1);
+   g_snaps[n] = s;
+  }
+
+//+------------------------------------------------------------------+
+void CollectItems(LiveItem &items[])
+  {
+   ArrayResize(items, 0);
+   const int posTotal = PositionsTotal();
+   for(int i = 0; i < posTotal; i++)
+     {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      LiveItem it;
+      it.ticket     = ticket;
+      it.positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+      it.isPosition = true;
+      it.comment    = PositionGetString(POSITION_COMMENT);
+      it.price      = PositionGetDouble(POSITION_PRICE_OPEN);
+      it.sl         = PositionGetDouble(POSITION_SL);
+      it.tp         = PositionGetDouble(POSITION_TP);
+      it.lot        = PositionGetDouble(POSITION_VOLUME);
+      it.orderType  = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                      ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      it.setupTime  = (datetime)PositionGetInteger(POSITION_TIME);
+      it.parsed     = ParsePacCommentEx(it.comment, it.pac);
+      const int n = ArraySize(items);
+      ArrayResize(items, n + 1);
+      items[n] = it;
+     }
+
+   const int ordTotal = OrdersTotal();
+   for(int i = 0; i < ordTotal; i++)
+     {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(OrderGetString(ORDER_SYMBOL) != _Symbol)
+         continue;
+      if(OrderGetInteger(ORDER_MAGIC) != InpMagic)
+         continue;
+
+      LiveItem it;
+      it.ticket     = ticket;
+      it.positionId = 0;
+      it.isPosition = false;
+      it.comment    = OrderGetString(ORDER_COMMENT);
+      it.price      = OrderGetDouble(ORDER_PRICE_OPEN);
+      it.sl         = OrderGetDouble(ORDER_SL);
+      it.tp         = OrderGetDouble(ORDER_TP);
+      it.lot        = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      if(it.lot <= 0.0)
+         it.lot = OrderGetDouble(ORDER_VOLUME_INITIAL);
+      it.orderType  = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      it.setupTime  = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+      it.parsed     = ParsePacCommentEx(it.comment, it.pac);
+      const int n = ArraySize(items);
+      ArrayResize(items, n + 1);
+      items[n] = it;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void UpdateSnapshots(const LiveItem &items[])
+  {
+   Snapshot fresh[];
+   ArrayResize(fresh, 0);
+   for(int i = 0; i < ArraySize(items); i++)
+     {
+      if(!items[i].isPosition || !items[i].parsed)
+         continue;
+      Snapshot s;
+      s.positionId = items[i].positionId;
+      s.ticket     = items[i].ticket;
+      s.comment    = items[i].comment;
+      s.entry      = items[i].price;
+      s.sl         = items[i].sl;
+      s.tp         = items[i].tp;
+      s.lot        = items[i].lot;
+      s.isBuy      = IsBuyOrderType(items[i].orderType);
+      const int n = ArraySize(fresh);
+      ArrayResize(fresh, n + 1);
+      fresh[n] = s;
+     }
+   ArrayResize(g_snaps, ArraySize(fresh));
+   for(int i = 0; i < ArraySize(fresh); i++)
+      g_snaps[i] = fresh[i];
+  }
+
+//+------------------------------------------------------------------+
+bool ItemMatchesGroup(const LiveItem &it, const PacGroup &g)
+  {
+   if(!it.parsed)
+      return(false);
+   if(it.pac.groupCode != g.groupCode)
+      return(false);
+   if(it.pac.layerCount != g.layerCount)
+      return(false);
+   if(it.pac.timeframe != g.timeframe)
+      return(false);
+   if(MathAbs(it.pac.clPrice - g.clPrice) >= _Point * 0.5)
+      return(false);
+   const int dir = IsBuyOrderType(it.orderType) ? 1 : -1;
+   return(dir == g.direction);
+  }
+
+//+------------------------------------------------------------------+
+bool IsClBreak(const PacGroup &g, const double closePrice)
+  {
+   if(g.direction > 0)
+      return(closePrice < g.clPrice);
+   return(closePrice > g.clPrice);
+  }
+
+//+------------------------------------------------------------------+
+void FlattenGroup(PacGroup &g)
+  {
+   LiveItem items[];
+   CollectItems(items);
+   for(int i = 0; i < ArraySize(items); i++)
+     {
+      if(!ItemMatchesGroup(items[i], g))
+         continue;
+      if(items[i].isPosition)
+        {
+         if(!g_trade.PositionClose(items[i].ticket) || !TradeOk())
+            if(ChartVisualsOn()) Print("PAC CLCC gagal tutup posisi #", items[i].ticket, " grup ", g.groupCode);
+        }
+      else
+        {
+         if(!g_trade.OrderDelete(items[i].ticket) || !TradeOk())
+            if(ChartVisualsOn()) Print("PAC CLCC gagal hapus pending #", items[i].ticket, " grup ", g.groupCode);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DropTpBatchesForGroup(const string code)
+  {
+   for(int i = ArraySize(g_tpBatches) - 1; i >= 0; i--)
+     {
+      if(g_tpBatches[i].groupCode == code)
+         RemoveTpBatchAt(i);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void ExecuteClcc(PacGroup &g)
+  {
+   g.clExecuted = true;
+   g_clccGroup  = g.groupCode;
+   RememberClcc(g);
+   DropTpBatchesForGroup(g.groupCode);
+   FlattenGroup(g);
+   ApplyClccToZones();
+   const string msg = "PAC CLCC " + _Symbol + " " + (g.direction > 0 ? "Buy " : "Sell ") + g.groupCode +
+                      " — pending dihapus, tidak reentry";
+   if(ChartVisualsOn()) Print(msg);
+   if(InpAlertOnCL)
+      Alert(msg);
+   g_clccGroup = "";
+  }
+
+//+------------------------------------------------------------------+
+void InitClccBarState(PacGroup &g)
+  {
+   const datetime currentBar = iTime(_Symbol, g.timeframe, 0);
+   if(currentBar == 0)
+     {
+      g.lastCheckedBarTime = 0;
+      return;
+     }
+
+   const int bars = Bars(_Symbol, g.timeframe);
+   int startIndex = 0;
+   for(int i = 0; i < bars && i < 100; i++)
+     {
+      const datetime t = iTime(_Symbol, g.timeframe, i);
+      if(t > 0 && t <= g.startedAt)
+        {
+         startIndex = i;
+         break;
+        }
+     }
+
+   if(startIndex >= 1)
+     {
+      for(int i = startIndex; i >= 1; i--)
+        {
+         const double cl = iClose(_Symbol, g.timeframe, i);
+         if(cl <= 0.0)
+            continue;
+         if(IsClBreak(g, cl))
+           {
+            if(ChartVisualsOn()) Print("PAC CLCC catch-up ", g.groupCode, " close[", i, "]=", DoubleToString(cl, _Digits));
+            g.lastCheckedBarTime = currentBar;
+            ExecuteClcc(g);
+            return;
+           }
+        }
+     }
+   g.lastCheckedBarTime = currentBar;
+  }
+
+//+------------------------------------------------------------------+
+void SyncGroups(const LiveItem &items[])
+  {
+   PacGroup next[];
+   ArrayResize(next, 0);
+   const int nItems = ArraySize(items);
+   bool assigned[];
+   ArrayResize(assigned, nItems);
+   for(int a = 0; a < nItems; a++)
+      assigned[a] = false;
+
+   for(int i = 0; i < nItems; i++)
+     {
+      if(!items[i].parsed || assigned[i])
+         continue;
+
+      PacGroup g;
+      g.groupCode           = items[i].pac.groupCode;
+      g.timeframe           = items[i].pac.timeframe;
+      g.clPrice             = items[i].pac.clPrice;
+      g.anchor             = ResolveOrderAnchor(items[i].pac.isBuy, items[i].pac.clPrice,
+                                                   items[i].sl, items[i].price,
+                                                   items[i].pac.layerCount, items[i].pac.position);
+      if(g.anchor <= 0.0)
+        {
+         const int z = FindZoneIndexForFrozenCl(items[i].pac.isBuy, items[i].pac.clPrice);
+         g.anchor = ZoneExtreme(items[i].pac.isBuy, z);
+        }
+      g.tfText              = items[i].pac.tfText;
+      g.layerCount          = items[i].pac.layerCount;
+      g.direction           = IsBuyOrderType(items[i].orderType) ? 1 : -1;
+      g.startedAt           = items[i].setupTime;
+      g.lastCheckedBarTime  = 0;
+      g.reentryCount        = 0;
+      g.clExecuted          = false;
+
+      for(int j = 0; j < nItems; j++)
+        {
+         if(!items[j].parsed)
+            continue;
+         if(items[j].pac.groupCode != g.groupCode)
+            continue;
+         assigned[j] = true;
+         if(items[j].setupTime < g.startedAt)
+            g.startedAt = items[j].setupTime;
+        }
+
+      const int oldIdx = FindGroupIndex(g.groupCode);
+      if(oldIdx >= 0)
+        {
+         g.lastCheckedBarTime = g_groups[oldIdx].lastCheckedBarTime;
+         g.reentryCount       = g_groups[oldIdx].reentryCount;
+         g.clExecuted         = g_groups[oldIdx].clExecuted;
+         if(g.anchor <= 0.0)
+            g.anchor = g_groups[oldIdx].anchor;
+        }
+      else
+         InitClccBarState(g);
+
+      const int nn = ArraySize(next);
+      ArrayResize(next, nn + 1);
+      next[nn] = g;
+     }
+
+   for(int i = 0; i < ArraySize(g_groups); i++)
+     {
+      if(g_groups[i].clExecuted)
+         continue;
+      if(FindBatchIndex(g_groups[i].groupCode) < 0)
+         continue;
+      bool inNext = false;
+      for(int j = 0; j < ArraySize(next); j++)
+        {
+         if(next[j].groupCode == g_groups[i].groupCode)
+           {
+            inNext = true;
+            break;
+           }
+        }
+      if(inNext)
+         continue;
+      const int nn = ArraySize(next);
+      ArrayResize(next, nn + 1);
+      next[nn] = g_groups[i];
+     }
+
+   ArrayResize(g_groups, ArraySize(next));
+   for(int i = 0; i < ArraySize(next); i++)
+      g_groups[i] = next[i];
+  }
+
+//+------------------------------------------------------------------+
+void CheckAllClcc()
+  {
+   for(int i = 0; i < ArraySize(g_groups); i++)
+     {
+      if(g_groups[i].clExecuted)
+         continue;
+      const ENUM_TIMEFRAMES tf = g_groups[i].timeframe;
+      const datetime currentBar = iTime(_Symbol, tf, 0);
+      if(currentBar == 0)
+         continue;
+      if(g_groups[i].lastCheckedBarTime == 0)
+        {
+         g_groups[i].lastCheckedBarTime = currentBar;
+         continue;
+        }
+      if(currentBar == g_groups[i].lastCheckedBarTime)
+         continue;
+
+      int idx = iBarShift(_Symbol, tf, g_groups[i].lastCheckedBarTime, false);
+      if(idx < 1)
+         idx = 1;
+      if(idx > 100)
+         idx = 100;
+
+      bool broke = false;
+      for(int b = idx; b >= 1; b--)
+        {
+         const double cl = iClose(_Symbol, tf, b);
+         if(cl <= 0.0)
+            continue;
+         if(IsClBreak(g_groups[i], cl))
+           {
+            if(ChartVisualsOn()) Print("PAC CLCC ", g_groups[i].groupCode,
+                  " TF=", g_groups[i].tfText,
+                  " close=", DoubleToString(cl, _Digits),
+                  " CL=", DoubleToString(g_groups[i].clPrice, _Digits));
+            ExecuteClcc(g_groups[i]);
+            broke = true;
+            break;
+           }
+        }
+      g_groups[i].lastCheckedBarTime = currentBar;
+      if(broke)
+         continue;
+     }
+  }
+
+//+------------------------------------------------------------------+
+void DeletePendingInGroup(PacGroup &g, const string tag)
+  {
+   LiveItem items[];
+   CollectItems(items);
+   int deleted = 0;
+   for(int i = 0; i < ArraySize(items); i++)
+     {
+      if(items[i].isPosition || !ItemMatchesGroup(items[i], g))
+         continue;
+      if(!g_trade.OrderDelete(items[i].ticket) || !TradeOk())
+        {
+         if(ChartVisualsOn()) Print("PAC ", tag, " gagal hapus #", items[i].ticket);
+        }
+      else
+        {
+         deleted++;
+         if(ChartVisualsOn()) Print("PAC ", tag, " hapus pending ", items[i].comment);
+        }
+     }
+   if(deleted <= 0)
+      return;
+   const string msg = "PAC " + tag + " " + _Symbol + " " + g.groupCode +
+                      " (" + IntegerToString(deleted) + " pending dihapus)";
+   if(ChartVisualsOn()) Print(msg);
+   if(tag == "MaxReentry" && InpAlertOnReentry)
+      Alert(msg);
+  }
+
+//+------------------------------------------------------------------+
+void QueueTpReentry(const PacCmt &pac, const double sl, const double entry)
+  {
+   int bi = FindBatchIndex(pac.groupCode);
+   if(bi < 0)
+     {
+      TpBatch b;
+      b.groupCode     = pac.groupCode;
+      b.windowStartMs = GetTickCount64();
+      ArrayResize(b.slots, 0);
+      const int n = ArraySize(g_tpBatches);
+      ArrayResize(g_tpBatches, n + 1);
+      g_tpBatches[n] = b;
+      bi = n;
+     }
+
+   TpSlot slot;
+   slot.isBuy      = pac.isBuy;
+   slot.layerCount = pac.layerCount;
+   slot.position   = pac.position;
+   slot.clPrice    = pac.clPrice;
+   slot.anchor     = ResolveOrderAnchor(pac.isBuy, pac.clPrice, sl, entry,
+                                        pac.layerCount, pac.position);
+   if(slot.anchor <= 0.0)
+     {
+      const int z = FindZoneIndexForFrozenCl(pac.isBuy, pac.clPrice);
+      slot.anchor = ZoneExtreme(pac.isBuy, z);
+     }
+   slot.stamp      = pac.stamp;
+   const int ns = ArraySize(g_tpBatches[bi].slots);
+   ArrayResize(g_tpBatches[bi].slots, ns + 1);
+   g_tpBatches[bi].slots[ns] = slot;
+  }
+
+//+------------------------------------------------------------------+
+void RemoveTpBatchAt(const int index)
+  {
+   const int n = ArraySize(g_tpBatches);
+   if(index < 0 || index >= n)
+      return;
+   for(int i = index; i < n - 1; i++)
+      g_tpBatches[i] = g_tpBatches[i + 1];
+   ArrayResize(g_tpBatches, n - 1);
+  }
+
+//+------------------------------------------------------------------+
+//| Reentry menghitung ulang Entry/CL/SL/TP dari nol pakai U saat ini |
+//| (boleh beda dari kirim pertama). Anchor zona (lantai/atap)       |
+//| terkunci di slot, tidak ikut ATR. TP: mandiri atau Auto Pasangan.|
+//+------------------------------------------------------------------+
+bool PlaceReentry(const TpSlot &slot, const double &liveCl[], const bool &liveBuy[], const int nLive)
+  {
+   double anchor = slot.anchor;
+   int zi = -1;
+   if(anchor > 0.0)
+      zi = FindZoneIndexForAnchor(slot.isBuy, anchor);
+   if(zi < 0)
+      zi = FindZoneIndexForCl(slot.isBuy, slot.clPrice);
+   if(zi < 0)
+      return(false);
+   anchor = ZoneExtreme(slot.isBuy, zi);
+   const double u = ComputeU();
+   double entry1 = 0.0, cl = 0.0, sl = 0.0;
+   CalcEntryClSl(slot.isBuy, anchor, u, entry1, cl, sl);
+   if(HasPacLayer(slot.isBuy, anchor, slot.position))
+      return(true);
+   const double mandiri = MandiriTp(slot.isBuy, anchor, u);
+   const double tp = IndependentTp(slot.isBuy, anchor, u, liveCl, liveBuy, nLive);
+   const int n = MathMax(slot.layerCount, 1);
+   const double entry = NormalizePrice(entry1 + (anchor - entry1) * (double)(slot.position - 1) / (double)n);
+   const double tpN = NormalizePrice(tp);
+   if((slot.isBuy && tpN <= entry) || (!slot.isBuy && tpN >= entry))
+      return(false);
+   const bool paired = (MathAbs(tp - mandiri) > _Point);
+   const double lot = LayerLot(slot.position);
+   const string cmt = MakeComment(paired, slot.isBuy, slot.layerCount, slot.position, cl, slot.stamp);
+   if(PlacePending(slot.isBuy, lot, entry, sl, tpN, cmt))
+     {
+      if(ChartVisualsOn()) Print("PAC reentry: ", cmt, " @ ", DoubleToString(entry, _Digits));
+      return(true);
+     }
+   return(false);
+  }
+
+//+------------------------------------------------------------------+
+void ProcessTpBatches()
+  {
+   const ulong nowMs = GetTickCount64();
+   const ulong win   = (ulong)MathMax(InpTpWindowMs, 100);
+
+   double liveCl[];
+   bool   liveBuy[];
+   int    nLive = 0;
+   bool   liveBuilt = false;
+
+   for(int i = ArraySize(g_tpBatches) - 1; i >= 0; i--)
+     {
+      if(nowMs - g_tpBatches[i].windowStartMs < win)
+         continue;
+
+      const string code = g_tpBatches[i].groupCode;
+      const int gi = FindGroupIndex(code);
+      if(gi < 0 || g_groups[gi].clExecuted)
+        {
+         RemoveTpBatchAt(i);
+         continue;
+        }
+
+      if(GroupPivotCapReached(g_groups[gi]))
+        {
+         if(ChartVisualsOn()) Print("PAC pivot cap ", code, " — tidak reentry");
+         DeletePendingInGroup(g_groups[gi], "pivot cap");
+         RemoveTpBatchAt(i);
+         continue;
+        }
+
+      if(g_groups[gi].reentryCount >= MathMax(InpMaxReentry, 0))
+        {
+         DeletePendingInGroup(g_groups[gi], "MaxReentry");
+         RemoveTpBatchAt(i);
+         continue;
+        }
+
+      string newsName = "";
+      if(InNewsWindow(newsName))
+         continue;
+      string hourLabel = "";
+      if(InHourFilterWindow(hourLabel))
+         continue;
+      if(IsDisabledDayWib())
+         continue;
+
+      if(!liveBuilt)
+        {
+         int buyIdx[], sellIdx[], nBuy = 0, nSell = 0;
+         BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
+         liveBuilt = true;
+        }
+
+      int okCount = 0;
+      for(int s = 0; s < ArraySize(g_tpBatches[i].slots); s++)
+        {
+         if(PlaceReentry(g_tpBatches[i].slots[s], liveCl, liveBuy, nLive))
+            okCount++;
+        }
+
+      if(okCount > 0)
+        {
+         g_groups[gi].reentryCount++;
+         const string msg = "PAC Reentry " + _Symbol + " " + code + " " +
+                            IntegerToString(g_groups[gi].reentryCount) + "/" +
+                            IntegerToString(InpMaxReentry);
+         if(ChartVisualsOn()) Print(msg);
+         if(InpAlertOnReentry)
+            Alert(msg);
+        }
+      RemoveTpBatchAt(i);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void ApplyNewsFilter()
+  {
+   string newsName = "";
+   if(InNewsWindow(newsName))
+     {
+      if(newsName != g_lastNewsName)
+        {
+         if(ChartVisualsOn()) Print("PAC news filter: ", newsName, " — tutup posisi & hapus pending");
+         g_lastNewsName = newsName;
+        }
+      FlattenNewsExposure();
+     }
+   else
+      g_lastNewsName = "";
+  }
+
+//+------------------------------------------------------------------+
+//| Sama seperti ApplyNewsFilter — pakai ulang FlattenNewsExposure()  |
+//| karena isinya generik (tutup semua posisi/pending simbol+magic    |
+//| ini), bukan spesifik ke berita.                                   |
+//+------------------------------------------------------------------+
+void ApplyHourFilter()
+  {
+   string hourLabel = "";
+   if(InHourFilterWindow(hourLabel))
+     {
+      if(hourLabel != g_lastHourFilterLabel)
+        {
+         string actionText = "Blokir Entri Baru";
+         if(InpHourFilter == HOUR_FLATTEN_ALL)
+            actionText = "Tutup Semua";
+         else if(InpHourFilter == HOUR_CANCEL_PENDING)
+            actionText = "Hanya Pending";
+         if(ChartVisualsOn()) Print("PAC hour filter: ", hourLabel, " — ", actionText);
+         g_lastHourFilterLabel = hourLabel;
+        }
+      if(InpHourFilter == HOUR_FLATTEN_ALL)
+         FlattenNewsExposure();
+      else if(InpHourFilter == HOUR_CANCEL_PENDING)
+        {
+         ArrayResize(g_tpBatches, 0);
+         CancelNewsPendings();
+        }
+      // HOUR_BLOCK_ENTRY_ONLY: jangan sentuh posisi/pending yang sudah ada;
+      // entry baru sudah diblok lewat gate InHourFilterWindow() di tempat lain.
+     }
+   else
+      g_lastHourFilterLabel = "";
+  }
+
+//+------------------------------------------------------------------+
+void RefreshGroupsAndClcc()
+  {
+   LiveItem items[];
+   CollectItems(items);
+   UpdateSnapshots(items);
+   SyncGroups(items);
+   CheckAllClcc();
+   for(int i = 0; i < ArraySize(g_groups); i++)
+     {
+      if(g_groups[i].clExecuted)
+         FlattenGroup(g_groups[i]);
+     }
+  }
+
+//+------------------------------------------------------------------+
+void ApplyPivotCapAndSlots()
+  {
+   LiveItem items[];
+   CollectItems(items);
+   UpdateSnapshots(items);
+   SyncGroups(items);
+
+   for(int i = 0; i < ArraySize(g_groups); i++)
+     {
+      if(g_groups[i].clExecuted)
+         continue;
+      if(!GroupPivotCapReached(g_groups[i]))
+         continue;
+      if(ChartVisualsOn()) Print("PAC pivot cap ", g_groups[i].groupCode, " — hapus pending, tidak reentry");
+      DeletePendingInGroup(g_groups[i], "pivot cap");
+      DropTpBatchesForGroup(g_groups[i].groupCode);
+     }
+
+   double liveCl[];
+   bool   liveBuy[];
+   int    nLive = 0;
+   int    buyIdx[];
+   int    sellIdx[];
+   int    nBuy = 0;
+   int    nSell = 0;
+   BuildLiveSlots(liveCl, liveBuy, nLive, buyIdx, nBuy, sellIdx, nSell);
+   CancelStalePendings(buyIdx, nBuy, sellIdx, nSell);
+   DropStaleTpBatches(buyIdx, nBuy, sellIdx, nSell);
+  }
+
+//+------------------------------------------------------------------+
+void ManageFast()
+  {
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   ApplyNewsFilter();
+   ApplyHourFilter();
+   ProcessTpBatches();
+   g_inRefresh = false;
+  }
+
+//+------------------------------------------------------------------+
+void ManageOrders()
+  {
+   if(g_inRefresh)
+      return;
+   g_inRefresh = true;
+   ApplyNewsFilter();
+   ApplyHourFilter();
+   RefreshGroupsAndClcc();
+   ApplyPivotCapAndSlots();
+   ProcessTpBatches();
+   g_inRefresh = false;
+   PaintArmedVisuals();
+  }
+
+//+------------------------------------------------------------------+
+void HandleTradeTransaction(const MqlTradeTransaction &trans)
+  {
+   if(trans.type == TRADE_TRANSACTION_POSITION && trans.position != 0)
+      UpsertPositionSnapshot(trans.position);
+
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+     {
+      if(!g_inRefresh &&
+         (trans.type == TRADE_TRANSACTION_ORDER_ADD ||
+          trans.type == TRADE_TRANSACTION_ORDER_DELETE ||
+          trans.type == TRADE_TRANSACTION_ORDER_UPDATE ||
+          trans.type == TRADE_TRANSACTION_POSITION ||
+          trans.type == TRADE_TRANSACTION_HISTORY_ADD))
+         ManageOrders();
+      return;
+     }
+
+   if(trans.deal == 0 || DealProcessed(trans.deal))
+      return;
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol)
+      return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic)
+      return;
+
+   const long entryFlag = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
+   const ulong posId    = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+
+   if(entryFlag != DEAL_ENTRY_OUT && entryFlag != DEAL_ENTRY_INOUT)
+     {
+      if(entryFlag == DEAL_ENTRY_IN && trans.position != 0)
+         UpsertPositionSnapshot(trans.position);
+      else if(entryFlag == DEAL_ENTRY_IN && posId != 0)
+        {
+         if(PositionSelectByTicket(posId))
+            UpsertPositionSnapshot(posId);
+        }
+      MarkDealProcessed(trans.deal);
+      return;
+     }
+
+   MarkDealProcessed(trans.deal);
+
+   const long reason = HistoryDealGetInteger(trans.deal, DEAL_REASON);
+
+   Snapshot snap;
+   snap.positionId = 0;
+   snap.ticket     = 0;
+   snap.comment    = "";
+   snap.entry      = 0;
+   snap.sl         = 0;
+   snap.tp         = 0;
+   snap.lot        = 0;
+   snap.isBuy      = false;
+   const int si = FindSnapIndex(posId);
+   if(si >= 0)
+      snap = g_snaps[si];
+   else
+     {
+      snap.positionId = posId;
+      snap.lot        = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+      snap.sl         = trans.price_sl;
+      snap.tp         = trans.price_tp;
+      if(!HistorySelectByPosition(posId))
+         return;
+      const int total = HistoryDealsTotal();
+      bool foundIn = false;
+      for(int i = 0; i < total; i++)
+        {
+         const ulong d = HistoryDealGetTicket(i);
+         if(d == 0)
+            continue;
+         if(HistoryDealGetInteger(d, DEAL_ENTRY) != DEAL_ENTRY_IN)
+            continue;
+         snap.entry   = HistoryDealGetDouble(d, DEAL_PRICE);
+         snap.comment = HistoryDealGetString(d, DEAL_COMMENT);
+         snap.isBuy   = (HistoryDealGetInteger(d, DEAL_TYPE) == DEAL_TYPE_BUY);
+         foundIn      = true;
+         break;
+        }
+      if(!foundIn)
+         return;
+     }
+
+   HistoryDealSelect(trans.deal);
+   if(trans.price_tp > 0.0)
+      snap.tp = trans.price_tp;
+   if(trans.price_sl > 0.0)
+      snap.sl = trans.price_sl;
+   const double dealVol = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+   if(dealVol > 0.0)
+      snap.lot = dealVol;
+   if(snap.tp <= 0.0 && reason == DEAL_REASON_TP)
+      snap.tp = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+
+   PacCmt pac;
+   if(!ParsePacCommentEx(snap.comment, pac))
+      return;
+
+   const int gi = FindGroupIndex(pac.groupCode);
+   if(gi < 0)
+      return;
+   if(g_groups[gi].clExecuted || g_clccGroup == pac.groupCode)
+      return;
+   double clccAnchor = ResolveOrderAnchor(pac.isBuy, pac.clPrice, snap.sl, snap.entry,
+                                          pac.layerCount, pac.position);
+   if(clccAnchor <= 0.0)
+     {
+      if(g_groups[gi].anchor > 0.0)
+         clccAnchor = g_groups[gi].anchor;
+      else
+        {
+         const int z = FindZoneIndexForFrozenCl(pac.isBuy, pac.clPrice);
+         clccAnchor = ZoneExtreme(pac.isBuy, z);
+        }
+     }
+   if(WasClcc(pac.isBuy, clccAnchor))
+      return;
+   if(reason == DEAL_REASON_EXPERT)
+      return;
+
+   if(reason == DEAL_REASON_TP)
+     {
+      QueueTpReentry(pac, snap.sl, snap.entry);
+      if(!g_inRefresh)
+         ManageOrders();
+      return;
+     }
+
+   if(reason == DEAL_REASON_SL ||
+      reason == DEAL_REASON_CLIENT ||
+      reason == DEAL_REASON_MOBILE)
+     {
+      if(ChartVisualsOn()) Print("PAC slot berhenti reentry: ", snap.comment, " reason=", reason);
+      return;
+     }
+  }
+
+//+------------------------------------------------------------------+
