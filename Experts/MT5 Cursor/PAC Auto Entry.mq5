@@ -4,7 +4,7 @@
 //|  Reentry setelah TP. CLCC close candle, bukan SL sentuh.         |
 //+------------------------------------------------------------------+
 #property copyright "PAC Auto Entry"
-#property version   "1.11"
+#property version   "1.13"
 #property description "PAC Auto Entry — Pivot, Base, Control, pending, CLCC, reentry"
 
 #include <Trade/Trade.mqh>
@@ -99,13 +99,13 @@ input group "=== Deteksi ==="
 input ENUM_DETECTION_TF InpDetectionTF   = TF_AUTO;          // TF Pivot & Base
 input int               InpLookback       = 300;             // Jml bar scan
 input int               InpMaxBaseCandles = 10;              // Maks candle Base per zona
-input ENUM_PIVOT_MODE   InpPivotMode      = PIVOT_MODE_KETAT; // Mode Pivot
+input ENUM_PIVOT_MODE   InpPivotMode      = PIVOT_MODE_LONGGAR; // Mode Pivot
 
 input group "=== Area ==="
-input ENUM_U_MODE InpUMode         = U_ATR_CURRENT; // Sumber
-input int         InpUPips         = 150;          // U - Pip Tetap
-input int         InpUAtrPercent   = 300;          // U - ATR
-input int         InpAtrPeriod     = 14;           // ATR Periode
+input ENUM_U_MODE InpUMode         = U_ATR_H1; // Sumber
+input int         InpUPips         = 200;          // U - Pip Tetap
+input int         InpUAtrPercent   = 190;          // U - ATR
+input int         InpAtrPeriod     = 48;           // ATR Periode
 input int         InpCLPercentArea = 30;          // Anchor -> CL
 input int         InpTPPercentArea = 200;          // Anchor -> TP
 input int         InpSLPercentArea = 300;          // Anchor -> SL
@@ -113,17 +113,17 @@ input bool        InpTpAdaptive    = true;         // TP Adaptif
 
 input group "=== Order ==="
 input double InpLot              = 0.01; // Lot Dasar
-input int    InpLayerCount       = 1;    // Jml Layer
+input int    InpLayerCount       = 3;    // Jml Layer
 input bool   InpLotStepUp        = true;  // Lot bertingkat
-input int    InpMaxPivotTouches  = 4;    // Maks sentuhan pivot
-input int    InpMaxGroupsPerSide = 2;    // Maks grup per arah
+input int    InpMaxPivotTouches  = 3;    // Maks sentuhan pivot
+input int    InpMaxGroupsPerSide = 1;    // Maks grup per arah
 input int    InpMaxReentry       = 3;    // Maks reentry grup after TP
 input bool   InpAutoPasangan     = true;  // Auto Pasangan
 
 input group "=== Filter ==="
-input ENUM_HOUR_FILTER InpHourFilter = HOUR_CANCEL_PENDING; // Filter Jam
-input ENUM_NEWS_FILTER InpNewsFilter = NEWS_60_60;          // Filter News
-input ENUM_DAY_FILTER  InpDayFilter  = DAY_THURSDAY;      // Filter Hari
+input ENUM_HOUR_FILTER InpHourFilter = HOUR_BLOCK_ENTRY_ONLY; // Filter Jam
+input ENUM_NEWS_FILTER InpNewsFilter = NEWS_30_30;          // Filter News
+input ENUM_DAY_FILTER  InpDayFilter  = DAY_FILTER_OFF;      // Filter Hari
 
 input group "=== Chart On Tester ==="
 input bool InpChartLiteMode  = true;  // Sembunyikan zona kadaluarsa
@@ -412,7 +412,7 @@ string USourceText()
 //+------------------------------------------------------------------+
 //| News USD+EUR, jam UTC. Investing high-impact + daftar dipertahan  |
 //| (Trump, Oil Inv, Claims, S&P/Chicago PMI, Homes, Durable).       |
-//| Event jam sama digabung labelnya. Cakupan 1 Jan 2025-31 Agu 2026.|
+//| Event jam sama digabung labelnya. Cakupan 1 Jan 2025-31 Des 2026.|
 //+------------------------------------------------------------------+
 int NewsCount()
   {
@@ -1188,6 +1188,120 @@ void InitNewsCalendar()
    AddNews(D'2026.08.28 14:00:00', "Fed Chair");
    AddNews(D'2026.08.31 12:00:00', "DE CPI Prel");
    AddNews(D'2026.08.31 13:45:00', "Chicago PMI");
+   AddNews(D'2026.09.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.09.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.09.01 14:00:00', "ISM Mfg / JOLTS");
+   AddNews(D'2026.09.02 12:15:00', "ADP");
+   AddNews(D'2026.09.02 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.03 12:30:00', "Claims");
+   AddNews(D'2026.09.03 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.09.03 14:00:00', "ISM Svc");
+   AddNews(D'2026.09.04 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.09.09 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.10 12:15:00', "ECB Rate");
+   AddNews(D'2026.09.10 12:30:00', "PPI / Claims");
+   AddNews(D'2026.09.10 12:45:00', "ECB Press");
+   AddNews(D'2026.09.10 14:00:00', "Existing Homes");
+   AddNews(D'2026.09.11 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.09.16 12:30:00', "Retail Sales");
+   AddNews(D'2026.09.16 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.16 18:00:00', "FOMC");
+   AddNews(D'2026.09.16 18:30:00', "FOMC Press");
+   AddNews(D'2026.09.17 12:30:00', "Claims");
+   AddNews(D'2026.09.23 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.09.23 14:30:00', "Oil Inv");
+   AddNews(D'2026.09.24 12:30:00', "Claims");
+   AddNews(D'2026.09.24 14:00:00', "New Homes");
+   AddNews(D'2026.09.25 12:30:00', "Durable Goods");
+   AddNews(D'2026.09.29 14:00:00', "JOLTS / CB Confidence");
+   AddNews(D'2026.09.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.09.30 12:15:00', "ADP");
+   AddNews(D'2026.09.30 12:30:00', "GDP / PCE / Core PCE");
+   AddNews(D'2026.09.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.09.30 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.01 12:30:00', "Claims");
+   AddNews(D'2026.10.01 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.10.01 14:00:00', "ISM Mfg");
+   AddNews(D'2026.10.02 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.10.02 12:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.10.05 13:45:00', "S&P Svc PMI");
+   AddNews(D'2026.10.05 14:00:00', "ISM Svc");
+   AddNews(D'2026.10.07 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.07 18:00:00', "FOMC Minutes");
+   AddNews(D'2026.10.08 12:30:00', "Claims");
+   AddNews(D'2026.10.13 14:00:00', "Existing Homes");
+   AddNews(D'2026.10.14 12:30:00', "CPI / Core CPI");
+   AddNews(D'2026.10.14 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.15 12:30:00', "PPI / Retail Sales / Claims");
+   AddNews(D'2026.10.21 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.22 12:30:00', "Claims");
+   AddNews(D'2026.10.22 13:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.10.27 12:30:00', "Durable Goods");
+   AddNews(D'2026.10.27 14:00:00', "New Homes / CB Confidence");
+   AddNews(D'2026.10.28 14:30:00', "Oil Inv");
+   AddNews(D'2026.10.28 18:00:00', "FOMC");
+   AddNews(D'2026.10.28 18:30:00', "FOMC Press");
+   AddNews(D'2026.10.29 12:15:00', "ECB Rate");
+   AddNews(D'2026.10.29 12:30:00', "GDP / PCE / Core PCE / Claims");
+   AddNews(D'2026.10.29 12:45:00', "ECB Press");
+   AddNews(D'2026.10.30 12:00:00', "DE CPI Prel");
+   AddNews(D'2026.10.30 13:45:00', "Chicago PMI");
+   AddNews(D'2026.11.02 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.11.02 15:00:00', "ISM Mfg");
+   AddNews(D'2026.11.03 15:00:00', "JOLTS");
+   AddNews(D'2026.11.04 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.11.04 13:15:00', "ADP");
+   AddNews(D'2026.11.04 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.11.04 15:00:00', "ISM Svc");
+   AddNews(D'2026.11.04 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.05 13:30:00', "Claims");
+   AddNews(D'2026.11.06 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.11.10 13:30:00', "CPI / Core CPI");
+   AddNews(D'2026.11.11 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.12 13:30:00', "Claims");
+   AddNews(D'2026.11.12 15:00:00', "Existing Homes");
+   AddNews(D'2026.11.13 13:30:00', "PPI");
+   AddNews(D'2026.11.17 13:30:00', "Retail Sales");
+   AddNews(D'2026.11.18 13:30:00', "Claims");
+   AddNews(D'2026.11.18 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.18 19:00:00', "FOMC Minutes");
+   AddNews(D'2026.11.23 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.11.24 15:00:00', "CB Confidence");
+   AddNews(D'2026.11.25 13:30:00', "GDP / PCE / Core PCE / Durable Goods / Claims");
+   AddNews(D'2026.11.25 15:00:00', "New Homes");
+   AddNews(D'2026.11.25 15:30:00', "Oil Inv");
+   AddNews(D'2026.11.30 13:00:00', "DE CPI Prel");
+   AddNews(D'2026.11.30 14:45:00', "Chicago PMI");
+   AddNews(D'2026.12.01 10:00:00', "EU CPI Flash");
+   AddNews(D'2026.12.01 14:45:00', "S&P Mfg PMI");
+   AddNews(D'2026.12.01 15:00:00', "ISM Mfg / JOLTS");
+   AddNews(D'2026.12.02 13:15:00', "ADP");
+   AddNews(D'2026.12.02 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.03 13:30:00', "Claims");
+   AddNews(D'2026.12.03 14:45:00', "S&P Svc PMI");
+   AddNews(D'2026.12.03 15:00:00', "ISM Svc");
+   AddNews(D'2026.12.04 13:30:00', "NFP / Unemp / AHE");
+   AddNews(D'2026.12.09 15:00:00', "Existing Homes");
+   AddNews(D'2026.12.09 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.09 19:00:00', "FOMC");
+   AddNews(D'2026.12.09 19:30:00', "FOMC Press");
+   AddNews(D'2026.12.10 13:30:00', "CPI / Core CPI / Claims");
+   AddNews(D'2026.12.15 13:30:00', "PPI");
+   AddNews(D'2026.12.16 13:30:00', "Retail Sales");
+   AddNews(D'2026.12.16 14:45:00', "S&P Mfg PMI / S&P Svc PMI");
+   AddNews(D'2026.12.16 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.17 12:15:00', "ECB Rate");
+   AddNews(D'2026.12.17 12:45:00', "ECB Press");
+   AddNews(D'2026.12.17 13:30:00', "Claims");
+   AddNews(D'2026.12.23 13:30:00', "GDP / PCE / Core PCE / Durable Goods");
+   AddNews(D'2026.12.23 15:00:00', "New Homes");
+   AddNews(D'2026.12.23 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.24 13:30:00', "Claims");
+   AddNews(D'2026.12.29 15:00:00', "CB Confidence");
+   AddNews(D'2026.12.30 14:45:00', "Chicago PMI");
+   AddNews(D'2026.12.30 15:30:00', "Oil Inv");
+   AddNews(D'2026.12.30 19:00:00', "FOMC Minutes");
+   AddNews(D'2026.12.31 13:30:00', "Claims");
   }
 
 //+------------------------------------------------------------------+
@@ -1621,7 +1735,7 @@ int OnInit()
       if(ChartVisualsOn()) Print("PAC news filter ON. Tutup posisi + hapus pending. Jendela ",
             beforeMin, " mnt sebelum / ", afterMin,
             " mnt sesudah rilis. Hardcode Investing high-impact USD ",
-            IntegerToString(NewsCount()), " event, 1 Jan 2025-31 Agu 2026 USD+EUR. Filter & garis chart jam HFM.");
+            IntegerToString(NewsCount()), " event, 1 Jan 2025-31 Des 2026 USD+EUR. Filter & garis chart jam HFM.");
      }
    if(HourFilterOn())
      {
